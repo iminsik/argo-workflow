@@ -5,6 +5,7 @@ cluster-up:
 	kubectl create namespace argo || true
 	kubectl apply -n argo -f https://github.com/argoproj/argo-workflows/releases/download/v3.5.0/quick-start-minimal.yaml
 	kubectl apply -f infrastructure/k8s/rbac.yaml
+	kubectl apply -f infrastructure/k8s/pv.yaml
 
 cluster-down:
 	kind delete cluster --name argo-dev

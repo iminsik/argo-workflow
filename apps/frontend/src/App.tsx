@@ -12,10 +12,20 @@ interface Task {
   pythonCode: string;
 }
 
+interface LogEntry {
+  node: string;
+  pod: string;
+  phase: string;
+  logs: string;
+}
+
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [activeTab, setActiveTab] = useState<'code' | 'logs'>('code');
+  const [taskLogs, setTaskLogs] = useState<LogEntry[]>([]);
+  const [loadingLogs, setLoadingLogs] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
   const [pythonCode, setPythonCode] = useState("print('Processing task in Kind...')");
   const [submitting, setSubmitting] = useState(false);
@@ -40,6 +50,41 @@ function App() {
     const interval = setInterval(fetchTasks, 5000);
     return () => clearInterval(interval);
   }, []);
+
+  const fetchTaskLogs = async (taskId: string) => {
+    try {
+      setLoadingLogs(true);
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/logs`);
+      if (!res.ok) {
+        throw new Error('Failed to fetch logs');
+      }
+      const data = await res.json();
+      setTaskLogs(data.logs || []);
+    } catch (error) {
+      console.error('Failed to fetch logs:', error);
+      setTaskLogs([{
+        node: 'error',
+        pod: 'N/A',
+        phase: 'Error',
+        logs: `Error fetching logs: ${error instanceof Error ? error.message : 'Unknown error'}`
+      }]);
+    } finally {
+      setLoadingLogs(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedTask && activeTab === 'logs') {
+      fetchTaskLogs(selectedTask.id);
+      // Refresh logs every 3 seconds if task is still running
+      const interval = setInterval(() => {
+        if (selectedTask && (selectedTask.phase === 'Running' || selectedTask.phase === 'Pending')) {
+          fetchTaskLogs(selectedTask.id);
+        }
+      }, 3000);
+      return () => clearInterval(interval);
+    }
+  }, [selectedTask, activeTab]);
 
   const runTask = async () => {
     try {
@@ -212,9 +257,13 @@ function App() {
             onClick={(e) => e.stopPropagation()}
           >
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h2 style={{ margin: 0 }}>Python Code - {selectedTask.id}</h2>
+              <h2 style={{ margin: 0 }}>Task Details - {selectedTask.id}</h2>
               <button
-                onClick={() => setSelectedTask(null)}
+                onClick={() => {
+                  setSelectedTask(null);
+                  setActiveTab('code');
+                  setTaskLogs([]);
+                }}
                 style={{
                   background: 'none',
                   border: 'none',
@@ -232,7 +281,7 @@ function App() {
                 ×
               </button>
             </div>
-            <div style={{ marginBottom: '1rem' }}>
+            <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', alignItems: 'center' }}>
               <span style={{
                 padding: '4px 8px',
                 borderRadius: '4px',
@@ -244,19 +293,95 @@ function App() {
                 {selectedTask.phase || 'Unknown'}
               </span>
             </div>
-            <div style={{
-              backgroundColor: '#1e1e1e',
-              color: '#d4d4d4',
-              padding: '1rem',
-              borderRadius: '4px',
-              fontFamily: 'monospace',
-              fontSize: '14px',
-              whiteSpace: 'pre-wrap',
-              overflow: 'auto',
-              border: '1px solid #3e3e3e'
-            }}>
-              {selectedTask.pythonCode || 'No Python code available'}
+            
+            {/* Tabs */}
+            <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', marginBottom: '1rem' }}>
+              <button
+                onClick={() => setActiveTab('code')}
+                style={{
+                  padding: '10px 20px',
+                  border: 'none',
+                  background: 'none',
+                  cursor: 'pointer',
+                  borderBottom: activeTab === 'code' ? '2px solid #3b82f6' : '2px solid transparent',
+                  color: activeTab === 'code' ? '#3b82f6' : '#6b7280',
+                  fontWeight: activeTab === 'code' ? 'bold' : 'normal'
+                }}
+              >
+                Code
+              </button>
+              <button
+                onClick={() => setActiveTab('logs')}
+                style={{
+                  padding: '10px 20px',
+                  border: 'none',
+                  background: 'none',
+                  cursor: 'pointer',
+                  borderBottom: activeTab === 'logs' ? '2px solid #3b82f6' : '2px solid transparent',
+                  color: activeTab === 'logs' ? '#3b82f6' : '#6b7280',
+                  fontWeight: activeTab === 'logs' ? 'bold' : 'normal'
+                }}
+              >
+                Logs {loadingLogs && '...'}
+              </button>
             </div>
+
+            {/* Tab Content */}
+            {activeTab === 'code' ? (
+              <div style={{
+                backgroundColor: '#1e1e1e',
+                color: '#d4d4d4',
+                padding: '1rem',
+                borderRadius: '4px',
+                fontFamily: 'monospace',
+                fontSize: '14px',
+                whiteSpace: 'pre-wrap',
+                overflow: 'auto',
+                border: '1px solid #3e3e3e',
+                maxHeight: '60vh'
+              }}>
+                {selectedTask.pythonCode || 'No Python code available'}
+              </div>
+            ) : (
+              <div style={{
+                backgroundColor: '#1e1e1e',
+                color: '#d4d4d4',
+                padding: '1rem',
+                borderRadius: '4px',
+                fontFamily: 'monospace',
+                fontSize: '14px',
+                whiteSpace: 'pre-wrap',
+                overflow: 'auto',
+                border: '1px solid #3e3e3e',
+                maxHeight: '60vh'
+              }}>
+                {loadingLogs ? (
+                  <div style={{ color: '#9ca3af' }}>Loading logs...</div>
+                ) : taskLogs.length === 0 ? (
+                  <div style={{ color: '#9ca3af' }}>No logs available yet. The task may still be starting.</div>
+                ) : (
+                  taskLogs.map((logEntry, index) => (
+                    <div key={index} style={{ marginBottom: '1.5rem' }}>
+                      <div style={{ 
+                        color: '#60a5fa', 
+                        marginBottom: '0.5rem',
+                        paddingBottom: '0.5rem',
+                        borderBottom: '1px solid #374151'
+                      }}>
+                        <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
+                      </div>
+                      <div style={{ 
+                        color: '#d4d4d4',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word'
+                      }}>
+                        {logEntry.logs}
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -313,6 +438,105 @@ function App() {
                 }}
               >
                 <X size={24} />
+              </button>
+            </div>
+            
+            <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+              <button
+                onClick={() => setPythonCode(`import json
+import os
+from datetime import datetime
+
+# Create results directory if it doesn't exist
+results_dir = "/mnt/results"
+os.makedirs(results_dir, exist_ok=True)
+
+# Generate some data to save
+task_id = os.getenv("ARGO_WORKFLOW_NAME", "unknown-task")
+result_data = {
+    "task_id": task_id,
+    "timestamp": datetime.now().isoformat(),
+    "status": "completed",
+    "result": "Task executed successfully!",
+    "data": {
+        "processed_items": 42,
+        "computation_time": 1.23,
+        "output": "Sample output data"
+    }
+}
+
+# Write to file
+output_file = os.path.join(results_dir, f"{task_id}_result.json")
+with open(output_file, "w") as f:
+    json.dump(result_data, f, indent=2)
+
+print(f"Results saved to {output_file}")
+print(f"Data: {json.dumps(result_data, indent=2)}")`)}
+                disabled={submitting}
+                style={{
+                  padding: '8px 16px',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  border: '1px solid #3b82f6',
+                  borderRadius: '4px',
+                  background: 'white',
+                  color: '#3b82f6',
+                  fontSize: '14px',
+                  opacity: submitting ? 0.5 : 1
+                }}
+              >
+                📝 Load: Write to PV
+              </button>
+              <button
+                onClick={() => setPythonCode(`import json
+import os
+from datetime import datetime
+
+# Read from results directory
+results_dir = "/mnt/results"
+
+if not os.path.exists(results_dir):
+    print(f"Error: Results directory {results_dir} does not exist")
+    exit(1)
+
+# List all result files
+result_files = [f for f in os.listdir(results_dir) if f.endswith("_result.json")]
+
+if not result_files:
+    print("No result files found in /mnt/results")
+    print(f"Directory contents: {os.listdir(results_dir)}")
+    exit(0)
+
+print(f"Found {len(result_files)} result file(s):")
+print("-" * 50)
+
+# Read and display each result file
+for result_file in sorted(result_files):
+    file_path = os.path.join(results_dir, result_file)
+    print(f"\\nReading: {result_file}")
+    print("-" * 50)
+    
+    try:
+        with open(file_path, "r") as f:
+            data = json.load(f)
+            print(json.dumps(data, indent=2))
+    except Exception as e:
+        print(f"Error reading {result_file}: {e}")
+
+print("\\n" + "=" * 50)
+print(f"Successfully read {len(result_files)} result file(s)")`)}
+                disabled={submitting}
+                style={{
+                  padding: '8px 16px',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  border: '1px solid #10b981',
+                  borderRadius: '4px',
+                  background: 'white',
+                  color: '#10b981',
+                  fontSize: '14px',
+                  opacity: submitting ? 0.5 : 1
+                }}
+              >
+                📖 Load: Read from PV
               </button>
             </div>
             

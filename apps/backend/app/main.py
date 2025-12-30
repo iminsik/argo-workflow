@@ -3,7 +3,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kubernetes import config
-from kubernetes.client import CustomObjectsApi
+from kubernetes.client import CustomObjectsApi, CoreV1Api
 from argo_workflows.model.object_meta import ObjectMeta
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgoprojWorkflowV1alpha1Workflow
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec
@@ -59,6 +59,10 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
         # Convert spec dict to argo_workflows WorkflowSpec
         # Need to handle nested templates array and container objects
         spec_dict = manifest_dict.get("spec", {}).copy() if manifest_dict.get("spec") else {}
+        
+        # Extract volumes to add back later (WorkflowSpec validation might fail with dict volumes)
+        volumes = spec_dict.pop("volumes", [])
+        
         if "templates" in spec_dict and spec_dict["templates"]:
             # Convert template dicts to Template objects
             templates = []
@@ -91,6 +95,12 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
         from argo_workflows.api_client import ApiClient
         api_client = ApiClient()
         workflow_dict = api_client.sanitize_for_serialization(workflow)
+        
+        # Add volumes back to the workflow dict (they were removed to avoid type validation issues)
+        if volumes:
+            if "spec" not in workflow_dict:
+                workflow_dict["spec"] = {}
+            workflow_dict["spec"]["volumes"] = volumes
         
         # Create workflow using Kubernetes CustomObjectsApi
         # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
@@ -170,6 +180,104 @@ async def list_tasks():
             })
         
         return {"tasks": workflows}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/v1/tasks/{task_id}/logs")
+async def get_task_logs(task_id: str):
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        core_api = CoreV1Api()
+        
+        # Get workflow to find pod names
+        custom_api = CustomObjectsApi()
+        workflow = custom_api.get_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workflows",
+            name=task_id
+        )
+        
+        status = workflow.get("status", {})
+        nodes = status.get("nodes", {})
+        
+        # Collect logs from all nodes (pods) in the workflow
+        all_logs = []
+        
+        for node_id, node_info in nodes.items():
+            node_type = node_info.get("type", "")
+            phase = node_info.get("phase", "")
+            
+            # Only get logs from Pod nodes
+            if node_type == "Pod":
+                # Try different ways to get the pod name
+                pod_name = (
+                    node_info.get("displayName") or 
+                    node_info.get("id") or 
+                    node_id
+                )
+                
+                # Argo workflows often prefix pod names with workflow name
+                # The actual pod name might be in the node ID or we need to list pods
+                try:
+                    # First try with the displayName/id directly
+                    try:
+                        logs = core_api.read_namespaced_pod_log(
+                            name=pod_name,
+                            namespace=namespace,
+                            tail_lines=1000
+                        )
+                    except:
+                        # If that fails, try to find the pod by label selector
+                        # Argo workflows label pods with workflow name
+                        label_selector = f"workflows.argoproj.io/workflow={task_id}"
+                        pods = core_api.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=label_selector
+                        )
+                        
+                        if pods.items:
+                            # Get logs from the first matching pod
+                            actual_pod_name = pods.items[0].metadata.name
+                            logs = core_api.read_namespaced_pod_log(
+                                name=actual_pod_name,
+                                namespace=namespace,
+                                tail_lines=1000
+                            )
+                            pod_name = actual_pod_name
+                        else:
+                            raise Exception("No pods found for workflow")
+                    
+                    all_logs.append({
+                        "node": node_id,
+                        "pod": pod_name,
+                        "phase": phase,
+                        "logs": logs
+                    })
+                except Exception as e:
+                    # Pod might not exist yet or logs not available
+                    all_logs.append({
+                        "node": node_id,
+                        "pod": pod_name,
+                        "phase": phase,
+                        "logs": f"Error fetching logs: {str(e)}\n\nNode info: {node_info}"
+                    })
+        
+        # If no pod logs found, try to get workflow-level messages
+        if not all_logs:
+            message = status.get("message", "")
+            if message:
+                all_logs.append({
+                    "node": "workflow",
+                    "pod": "N/A",
+                    "phase": status.get("phase", "Unknown"),
+                    "logs": f"Workflow message: {message}"
+                })
+        
+        return {"logs": all_logs}
     except Exception as e:
         import traceback
         traceback.print_exc()

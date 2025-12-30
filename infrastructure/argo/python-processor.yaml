@@ -4,9 +4,16 @@ metadata:
   generateName: python-job-
 spec:
   entrypoint: main
+  volumes:
+    - name: task-results
+      persistentVolumeClaim:
+        claimName: task-results-pvc
   templates:
     - name: main
       container:
         image: python:3.11-slim
         command: [python, -c]
         args: ["print('Processing task in Kind...')"]
+        volumeMounts:
+          - name: task-results
+            mountPath: /mnt/results
