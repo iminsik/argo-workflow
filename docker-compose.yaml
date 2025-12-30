@@ -8,6 +8,8 @@ services:
       dockerfile: Dockerfile.dev
     volumes: [ "./apps/backend:/app", "~/.kube:/root/.kube:ro", "./infrastructure:/infrastructure:ro" ]
     ports: ["8000:8000"]
+    # extra_hosts:
+    #   - "host.docker.internal:host-gateway"
   frontend:
     build:
       context: ./apps/frontend
