@@ -83,10 +83,12 @@ async def start_task():
         workflow_dict = api_client.sanitize_for_serialization(workflow)
         
         # Create workflow using Kubernetes CustomObjectsApi
+        # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
         result = api_instance.create_namespaced_custom_object(
             group="argoproj.io",
             version="v1alpha1",
-            namespace="default",
+            namespace=namespace,
             plural="workflows",
             body=workflow_dict
         )
@@ -105,11 +107,12 @@ async def list_tasks():
         # Use Kubernetes CustomObjectsApi to list Workflow CRDs
         api_instance = CustomObjectsApi()
         
-        # List workflows in default namespace
+        # List workflows in argo namespace where workflow controller is watching (--namespaced mode)
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
         result = api_instance.list_namespaced_custom_object(
             group="argoproj.io",
             version="v1alpha1",
-            namespace="default",
+            namespace=namespace,
             plural="workflows"
         )
         
@@ -118,12 +121,22 @@ async def list_tasks():
         for item in result.get("items", []):
             metadata = item.get("metadata", {})
             status = item.get("status", {})
+            
+            # Determine phase - check multiple possible locations
+            phase = status.get("phase") or "Pending"
+            if not status:  # No status means workflow hasn't been processed yet
+                phase = "Pending"
+            
+            # Get timestamps from status
+            started_at = status.get("startedAt") or status.get("startTime") or ""
+            finished_at = status.get("finishedAt") or status.get("finishTime") or ""
+            
             workflows.append({
                 "id": metadata.get("name", "unknown"),
                 "generateName": metadata.get("generateName", ""),
-                "phase": status.get("phase", "Unknown"),
-                "startedAt": status.get("startedAt", ""),
-                "finishedAt": status.get("finishedAt", ""),
+                "phase": phase,
+                "startedAt": started_at,
+                "finishedAt": finished_at,
                 "createdAt": metadata.get("creationTimestamp", ""),
             })
         

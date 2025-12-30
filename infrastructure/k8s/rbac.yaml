@@ -2,11 +2,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: backend-sa
+  namespace: argo
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: argo-manager
+  namespace: argo
 rules:
   - apiGroups: ["argoproj.io"]
     resources: ["workflows"]
@@ -16,9 +18,11 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: backend-sa-binding
+  namespace: argo
 subjects:
   - kind: ServiceAccount
     name: backend-sa
+    namespace: argo
 roleRef:
   kind: Role
   name: argo-manager
