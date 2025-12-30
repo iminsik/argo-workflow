@@ -1,0 +1,19 @@
+kind: Environment
+name: Argo-Fullstack-PR
+type: primary
+components:
+  - name: db
+    kind: Database
+    dockerCompose: { image: 'postgres:15-alpine', environment: { POSTGRES_PASSWORD: password } }
+  - name: backend
+    kind: Application
+    context: apps/backend
+    dockerfile: Dockerfile.dev
+    pod: { serviceAccountName: backend-sa }
+    hosts: [ { hostname: "api-{{env.BUNNYSHELL_SPACE_DOMAIN}}", path: /, port: 8000 } ]
+  - name: frontend
+    kind: Application
+    context: apps/frontend
+    dockerfile: Dockerfile.dev
+    environment: { VITE_API_URL: "https://api-{{env.BUNNYSHELL_SPACE_DOMAIN}}" }
+    hosts: [ { hostname: "web-{{env.BUNNYSHELL_SPACE_DOMAIN}}", path: /, port: 5173 } ]
