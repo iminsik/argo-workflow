@@ -99,6 +99,40 @@ async def start_task():
         # Ensure CORS headers are sent even on error
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/tasks")
+async def list_tasks():
+    try:
+        # Use Kubernetes CustomObjectsApi to list Workflow CRDs
+        api_instance = CustomObjectsApi()
+        
+        # List workflows in default namespace
+        result = api_instance.list_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace="default",
+            plural="workflows"
+        )
+        
+        # Extract workflow information
+        workflows = []
+        for item in result.get("items", []):
+            metadata = item.get("metadata", {})
+            status = item.get("status", {})
+            workflows.append({
+                "id": metadata.get("name", "unknown"),
+                "generateName": metadata.get("generateName", ""),
+                "phase": status.get("phase", "Unknown"),
+                "startedAt": status.get("startedAt", ""),
+                "finishedAt": status.get("finishedAt", ""),
+                "createdAt": metadata.get("creationTimestamp", ""),
+            })
+        
+        return {"tasks": workflows}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
 @app.post("/api/v1/tasks/callback")
 async def handle_callback(data: dict):
     print(f"Callback: {data}")

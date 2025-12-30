@@ -1,20 +1,149 @@
-import React from 'react';
-import { Play } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { Play, RefreshCw } from 'lucide-react';
+
+interface Task {
+  id: string;
+  generateName: string;
+  phase: string;
+  startedAt: string;
+  finishedAt: string;
+  createdAt: string;
+}
 
 function App() {
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [loading, setLoading] = useState(false);
+  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+  const fetchTasks = async () => {
+    try {
+      setLoading(true);
+      const res = await fetch(`${apiUrl}/api/v1/tasks`);
+      const data = await res.json();
+      setTasks(data.tasks || []);
+    } catch (error) {
+      console.error('Failed to fetch tasks:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchTasks();
+    // Refresh every 5 seconds
+    const interval = setInterval(fetchTasks, 5000);
+    return () => clearInterval(interval);
+  }, []);
+
   const runTask = async () => {
-    const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
-    const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, { method: 'POST' });
-    const data = await res.json();
-    alert('Started Workflow: ' + data.id);
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, { method: 'POST' });
+      const data = await res.json();
+      alert('Started Workflow: ' + data.id);
+      // Refresh the task list
+      fetchTasks();
+    } catch (error) {
+      console.error('Failed to submit task:', error);
+      alert('Failed to submit task');
+    }
+  };
+
+  const getPhaseColor = (phase: string) => {
+    switch (phase) {
+      case 'Succeeded': return '#10b981';
+      case 'Failed': return '#ef4444';
+      case 'Running': return '#3b82f6';
+      case 'Pending': return '#f59e0b';
+      default: return '#6b7280';
+    }
   };
 
   return (
-    <div style={{ padding: '2rem', fontFamily: 'sans-serif' }}>
-      <h1>Argo Workflow Manager</h1>
-      <button onClick={runTask} style={{ display: 'flex', gap: '8px', padding: '10px 20px', cursor: 'pointer' }}>
-        <Play size={20} /> Run Python Task
-      </button>
+    <div style={{ padding: '2rem', fontFamily: 'sans-serif', maxWidth: '1200px', margin: '0 auto' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
+        <h1>Argo Workflow Manager</h1>
+        <div style={{ display: 'flex', gap: '10px' }}>
+          <button 
+            onClick={fetchTasks} 
+            disabled={loading}
+            style={{ 
+              display: 'flex', 
+              gap: '8px', 
+              padding: '10px 20px', 
+              cursor: 'pointer',
+              border: '1px solid #ccc',
+              borderRadius: '4px',
+              background: 'white'
+            }}
+          >
+            <RefreshCw size={20} /> Refresh
+          </button>
+          <button 
+            onClick={runTask} 
+            style={{ 
+              display: 'flex', 
+              gap: '8px', 
+              padding: '10px 20px', 
+              cursor: 'pointer',
+              background: '#3b82f6',
+              color: 'white',
+              border: 'none',
+              borderRadius: '4px'
+            }}
+          >
+            <Play size={20} /> Run Python Task
+          </button>
+        </div>
+      </div>
+
+      <div style={{ marginTop: '2rem' }}>
+        <h2>Submitted Tasks</h2>
+        {loading && tasks.length === 0 ? (
+          <p>Loading tasks...</p>
+        ) : tasks.length === 0 ? (
+          <p>No tasks found. Submit a task to get started.</p>
+        ) : (
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
+            <thead>
+              <tr style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left' }}>
+                <th style={{ padding: '12px' }}>ID</th>
+                <th style={{ padding: '12px' }}>Phase</th>
+                <th style={{ padding: '12px' }}>Started</th>
+                <th style={{ padding: '12px' }}>Finished</th>
+                <th style={{ padding: '12px' }}>Created</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tasks.map((task) => (
+                <tr key={task.id} style={{ borderBottom: '1px solid #e5e7eb' }}>
+                  <td style={{ padding: '12px', fontFamily: 'monospace' }}>{task.id}</td>
+                  <td style={{ padding: '12px' }}>
+                    <span style={{
+                      padding: '4px 8px',
+                      borderRadius: '4px',
+                      background: getPhaseColor(task.phase),
+                      color: 'white',
+                      fontSize: '12px',
+                      fontWeight: 'bold'
+                    }}>
+                      {task.phase || 'Unknown'}
+                    </span>
+                  </td>
+                  <td style={{ padding: '12px' }}>
+                    {task.startedAt ? new Date(task.startedAt).toLocaleString() : '-'}
+                  </td>
+                  <td style={{ padding: '12px' }}>
+                    {task.finishedAt ? new Date(task.finishedAt).toLocaleString() : '-'}
+                  </td>
+                  <td style={{ padding: '12px' }}>
+                    {task.createdAt ? new Date(task.createdAt).toLocaleString() : '-'}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
     </div>
   );
 }
