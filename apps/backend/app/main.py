@@ -1,6 +1,7 @@
 import yaml, os
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 from kubernetes import config
 from kubernetes.client import CustomObjectsApi
 from argo_workflows.model.object_meta import ObjectMeta
@@ -36,8 +37,11 @@ except:
         configuration.verify_ssl = False
         Configuration.set_default(configuration)
 
+class TaskSubmitRequest(BaseModel):
+    pythonCode: str = "print('Processing task in Kind...')"
+
 @app.post("/api/v1/tasks/submit")
-async def start_task():
+async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
     try:
         # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
         api_instance = CustomObjectsApi()
@@ -62,7 +66,13 @@ async def start_task():
                 template_dict_copy = template_dict.copy()
                 # Convert container dict to Container object if present
                 if "container" in template_dict_copy and template_dict_copy["container"]:
-                    template_dict_copy["container"] = Container(**template_dict_copy["container"])
+                    container_dict = template_dict_copy["container"].copy()
+                    # Replace the Python code with the provided code
+                    if "args" in container_dict and container_dict["args"]:
+                        container_dict["args"] = [request.pythonCode]
+                    else:
+                        container_dict["args"] = [request.pythonCode]
+                    template_dict_copy["container"] = Container(**container_dict)
                 templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
             spec_dict["templates"] = templates
         

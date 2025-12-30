@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
-import { Play, RefreshCw } from 'lucide-react';
+import { Play, RefreshCw, X } from 'lucide-react';
+import Editor from '@monaco-editor/react';
 
 interface Task {
   id: string;
@@ -15,6 +16,9 @@ function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [pythonCode, setPythonCode] = useState("print('Processing task in Kind...')");
+  const [submitting, setSubmitting] = useState(false);
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
   const fetchTasks = async () => {
@@ -39,14 +43,30 @@ function App() {
 
   const runTask = async () => {
     try {
-      const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, { method: 'POST' });
+      setSubmitting(true);
+      const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ pythonCode }),
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to submit task');
+      }
+      
       const data = await res.json();
       alert('Started Workflow: ' + data.id);
+      setShowSubmitModal(false);
       // Refresh the task list
       fetchTasks();
     } catch (error) {
       console.error('Failed to submit task:', error);
-      alert('Failed to submit task');
+      alert('Failed to submit task: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -81,7 +101,7 @@ function App() {
             <RefreshCw size={20} /> Refresh
           </button>
           <button 
-            onClick={runTask} 
+            onClick={() => setShowSubmitModal(true)} 
             style={{ 
               display: 'flex', 
               gap: '8px', 
@@ -236,6 +256,127 @@ function App() {
               border: '1px solid #3e3e3e'
             }}>
               {selectedTask.pythonCode || 'No Python code available'}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal for submitting new task with code editor */}
+      {showSubmitModal && (
+        <div 
+          style={{
+            position: 'fixed',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.5)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            zIndex: 1001
+          }}
+          onClick={() => !submitting && setShowSubmitModal(false)}
+        >
+          <div 
+            style={{
+              backgroundColor: 'white',
+              borderRadius: '8px',
+              padding: '2rem',
+              maxWidth: '900px',
+              width: '90%',
+              maxHeight: '85vh',
+              overflow: 'auto',
+              boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)',
+              display: 'flex',
+              flexDirection: 'column'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+              <h2 style={{ margin: 0 }}>Write Python Code to Execute</h2>
+              <button
+                onClick={() => !submitting && setShowSubmitModal(false)}
+                disabled={submitting}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  color: '#6b7280',
+                  padding: '0',
+                  width: '30px',
+                  height: '30px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  opacity: submitting ? 0.5 : 1
+                }}
+              >
+                <X size={24} />
+              </button>
+            </div>
+            
+            <div style={{ 
+              flex: 1,
+              minHeight: '400px',
+              border: '1px solid #e5e7eb',
+              borderRadius: '4px',
+              overflow: 'hidden',
+              marginBottom: '1.5rem'
+            }}>
+              <Editor
+                height="400px"
+                defaultLanguage="python"
+                value={pythonCode}
+                onChange={(value) => setPythonCode(value || '')}
+                theme="vs-dark"
+                options={{
+                  minimap: { enabled: false },
+                  fontSize: 14,
+                  lineNumbers: 'on',
+                  scrollBeyondLastLine: false,
+                  automaticLayout: true,
+                }}
+              />
+            </div>
+
+            <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowSubmitModal(false)}
+                disabled={submitting}
+                style={{
+                  padding: '10px 20px',
+                  cursor: submitting ? 'not-allowed' : 'pointer',
+                  border: '1px solid #ccc',
+                  borderRadius: '4px',
+                  background: 'white',
+                  opacity: submitting ? 0.5 : 1
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={runTask}
+                disabled={submitting || !pythonCode.trim()}
+                style={{
+                  padding: '10px 20px',
+                  cursor: (submitting || !pythonCode.trim()) ? 'not-allowed' : 'pointer',
+                  border: 'none',
+                  borderRadius: '4px',
+                  background: '#3b82f6',
+                  color: 'white',
+                  opacity: (submitting || !pythonCode.trim()) ? 0.5 : 1,
+                  display: 'flex',
+                  gap: '8px',
+                  alignItems: 'center'
+                }}
+              >
+                {submitting ? 'Submitting...' : (
+                  <>
+                    <Play size={18} /> Submit Task
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>
