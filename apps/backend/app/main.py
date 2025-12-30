@@ -121,6 +121,7 @@ async def list_tasks():
         for item in result.get("items", []):
             metadata = item.get("metadata", {})
             status = item.get("status", {})
+            spec = item.get("spec", {})
             
             # Determine phase - check multiple possible locations
             phase = status.get("phase") or "Pending"
@@ -131,6 +132,23 @@ async def list_tasks():
             started_at = status.get("startedAt") or status.get("startTime") or ""
             finished_at = status.get("finishedAt") or status.get("finishTime") or ""
             
+            # Extract Python code from workflow spec
+            python_code = ""
+            templates = spec.get("templates", [])
+            if templates:
+                # Get the first template (entrypoint)
+                template = templates[0]
+                container = template.get("container", {})
+                args = container.get("args", [])
+                if args:
+                    # The Python code is typically in the first arg
+                    python_code = args[0] if isinstance(args[0], str) else ""
+                elif container.get("command"):
+                    # If no args, check if command contains the code
+                    command = container.get("command", [])
+                    if command and len(command) > 1:
+                        python_code = " ".join(command)
+            
             workflows.append({
                 "id": metadata.get("name", "unknown"),
                 "generateName": metadata.get("generateName", ""),
@@ -138,6 +156,7 @@ async def list_tasks():
                 "startedAt": started_at,
                 "finishedAt": finished_at,
                 "createdAt": metadata.get("creationTimestamp", ""),
+                "pythonCode": python_code,
             })
         
         return {"tasks": workflows}
