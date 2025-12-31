@@ -14,10 +14,27 @@
 
   let container: HTMLDivElement;
   let editorInstance: editor.IStandaloneCodeEditor | null = null;
+  let isUpdatingFromExternal = false;
 
+  // Update editor when value prop changes - use $effect to track value
   $effect(() => {
-    if (editorInstance && editorInstance.getValue() !== value) {
-      editorInstance.setValue(value);
+    // Access value to create dependency
+    const currentValue = value;
+    
+    if (editorInstance) {
+      const editorValue = editorInstance.getValue();
+      if (editorValue !== currentValue) {
+        isUpdatingFromExternal = true;
+        editorInstance.setValue(currentValue);
+        // Move cursor to end and scroll to bottom
+        const lineCount = editorInstance.getModel()?.getLineCount() || 1;
+        editorInstance.setPosition({ lineNumber: lineCount, column: 1 });
+        editorInstance.revealLine(lineCount);
+        // Small delay to ensure update completes
+        setTimeout(() => {
+          isUpdatingFromExternal = false;
+        }, 0);
+      }
     }
   });
 
@@ -36,9 +53,12 @@
     });
 
     editorInstance.onDidChangeModelContent(() => {
-      const newValue = editorInstance?.getValue() || '';
-      if (newValue !== value) {
-        value = newValue;
+      // Only update the prop if the change came from user input, not from external update
+      if (!isUpdatingFromExternal && editorInstance) {
+        const newValue = editorInstance.getValue();
+        if (newValue !== value) {
+          value = newValue;
+        }
       }
     });
 
