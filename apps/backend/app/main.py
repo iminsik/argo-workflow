@@ -459,86 +459,105 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
     last_logs_hash = ""
     last_sent_logs = []
     
-    try:
-        while True:
+    # Helper function to fetch and send logs
+    async def fetch_and_send_logs():
+        nonlocal last_logs_hash, last_sent_logs
+        try:
+            # Get workflow status
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=task_id
+            )
+            
+            status = workflow.get("status", {})
+            phase = status.get("phase", "Unknown")
+            
+            # Try to get logs from database first
+            db_logs = get_logs_from_database(task_id, db)
+            
+            # Also fetch latest from Kubernetes to get any new logs
             try:
-                # Get workflow status
-                workflow = custom_api.get_namespaced_custom_object(
-                    group="argoproj.io",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="workflows",
-                    name=task_id
-                )
+                k8s_logs = fetch_logs_from_kubernetes(task_id, namespace)
                 
-                status = workflow.get("status", {})
-                phase = status.get("phase", "Unknown")
+                # Save/update logs in database
+                if k8s_logs:
+                    save_logs_to_database(task_id, k8s_logs, db)
+                    # Use Kubernetes logs (they're more up-to-date)
+                    all_logs = k8s_logs
+                elif db_logs:
+                    # Use database logs if Kubernetes fetch failed
+                    all_logs = db_logs
+                else:
+                    all_logs = []
+            except Exception as k8s_error:
+                # If Kubernetes fetch fails, use database logs
+                if db_logs:
+                    all_logs = db_logs
+                else:
+                    all_logs = []
+            
+            # Create hash to check if logs changed
+            logs_hash = json.dumps(all_logs, sort_keys=True)
+            
+            # Send logs if they changed (or if this is the first time)
+            if logs_hash != last_logs_hash:
+                last_logs_hash = logs_hash
+                last_sent_logs = all_logs
                 
-                # Try to get logs from database first
-                db_logs = get_logs_from_database(task_id, db)
-                
-                # Also fetch latest from Kubernetes to get any new logs
-                try:
-                    k8s_logs = fetch_logs_from_kubernetes(task_id, namespace)
-                    
-                    # Save/update logs in database
-                    if k8s_logs:
-                        save_logs_to_database(task_id, k8s_logs, db)
-                        # Use Kubernetes logs (they're more up-to-date)
-                        all_logs = k8s_logs
-                    elif db_logs:
-                        # Use database logs if Kubernetes fetch failed
-                        all_logs = db_logs
-                    else:
-                        all_logs = []
-                except Exception as k8s_error:
-                    # If Kubernetes fetch fails, use database logs
-                    if db_logs:
-                        all_logs = db_logs
-                    else:
-                        all_logs = []
-                
-                # Create hash to check if logs changed
-                logs_hash = json.dumps(all_logs, sort_keys=True)
-                
-                # Only send if logs changed
-                if logs_hash != last_logs_hash:
-                    last_logs_hash = logs_hash
-                    last_sent_logs = all_logs
-                    
-                    await websocket.send_json({
-                        "type": "logs",
-                        "data": all_logs,
-                        "workflow_phase": phase
-                    })
-                
-                # Check if workflow is finished
-                if phase in ["Succeeded", "Failed", "Error"]:
-                    # Final save to ensure all logs are persisted
-                    try:
-                        final_logs = fetch_logs_from_kubernetes(task_id, namespace)
-                        if final_logs:
-                            save_logs_to_database(task_id, final_logs, db)
-                    except:
-                        pass
-                    
-                    await websocket.send_json({
-                        "type": "complete",
-                        "workflow_phase": phase
-                    })
-                    # Keep connection open for a bit, then close
-                    await asyncio.sleep(2)
-                    break
-                
-                # Wait before next check
-                await asyncio.sleep(2)
-                
-            except Exception as e:
                 await websocket.send_json({
-                    "type": "error",
-                    "message": str(e)
+                    "type": "logs",
+                    "data": all_logs,
+                    "workflow_phase": phase
                 })
+            
+            return phase, all_logs
+        except Exception as e:
+            print(f"Error in fetch_and_send_logs: {e}")
+            import traceback
+            traceback.print_exc()
+            await websocket.send_json({
+                "type": "error",
+                "message": str(e)
+            })
+            return "Unknown", []
+    
+    try:
+        # Send initial logs immediately upon connection
+        phase, _ = await fetch_and_send_logs()
+        
+        # Then continue polling
+        while True:
+            phase, all_logs = await fetch_and_send_logs()
+            
+            # Check if workflow is finished
+            if phase in ["Succeeded", "Failed", "Error"]:
+                # Final save to ensure all logs are persisted
+                try:
+                    final_logs = fetch_logs_from_kubernetes(task_id, namespace)
+                    if final_logs:
+                        save_logs_to_database(task_id, final_logs, db)
+                        # Send final logs update
+                        await websocket.send_json({
+                            "type": "logs",
+                            "data": final_logs,
+                            "workflow_phase": phase
+                        })
+                except:
+                    pass
+                
+                await websocket.send_json({
+                    "type": "complete",
+                    "workflow_phase": phase
+                })
+                # Keep connection open for a bit, then close
                 await asyncio.sleep(2)
+                break
+            
+            # Wait before next check
+            await asyncio.sleep(2)
                 
     except WebSocketDisconnect:
         pass
@@ -555,6 +574,10 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
 
 @app.delete("/api/v1/tasks/{task_id}")
 async def cancel_task(task_id: str):
+    """
+    Cancel a running or pending task by deleting the workflow from Kubernetes.
+    Does not delete logs from database.
+    """
     try:
         namespace = os.getenv("ARGO_NAMESPACE", "argo")
         api_instance = CustomObjectsApi()
@@ -569,6 +592,54 @@ async def cancel_task(task_id: str):
         )
         
         return {"status": "cancelled", "id": task_id}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Check if it's a 404 (workflow not found)
+        if "404" in str(e) or "Not Found" in str(e):
+            raise HTTPException(status_code=404, detail=f"Workflow {task_id} not found")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/v1/tasks/{task_id}/delete")
+async def delete_task(task_id: str, db: Session = Depends(get_db)):
+    """
+    Permanently delete a task: removes workflow from Kubernetes AND logs from database.
+    Works for any task regardless of status.
+    """
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        api_instance = CustomObjectsApi()
+        
+        # Delete logs from database first
+        try:
+            deleted_logs = db.query(TaskLog).filter(TaskLog.task_id == task_id).delete()
+            db.commit()
+            print(f"Deleted {deleted_logs} log entries from database for task {task_id}")
+        except Exception as db_error:
+            db.rollback()
+            print(f"Error deleting logs from database: {db_error}")
+            # Continue with workflow deletion even if database deletion fails
+        
+        # Delete the workflow from Kubernetes
+        try:
+            api_instance.delete_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=task_id
+            )
+        except Exception as k8s_error:
+            # If workflow doesn't exist in Kubernetes, that's okay - we still deleted the logs
+            if "404" not in str(k8s_error) and "Not Found" not in str(k8s_error):
+                raise k8s_error
+        
+        return {
+            "status": "deleted", 
+            "id": task_id,
+            "logs_deleted": deleted_logs
+        }
     except Exception as e:
         import traceback
         traceback.print_exc()

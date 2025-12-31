@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { Play, RefreshCw, X, XCircle } from 'lucide-react';
+import { Play, RefreshCw, X, XCircle, Trash2 } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
 interface Task {
@@ -21,11 +21,12 @@ interface LogEntry {
 }
 
 // Memoized TaskRow component to prevent unnecessary re-renders
-const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
+const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel, onDelete }: {
   task: Task;
   getPhaseColor: (phase: string) => string;
   onTaskClick: (task: Task) => void;
   onCancel: (taskId: string) => void;
+  onDelete: (taskId: string) => void;
 }) => {
   const canCancel = task.phase === 'Running' || task.phase === 'Pending';
   
@@ -40,6 +41,11 @@ const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
   const handleCancelClick = (e: React.MouseEvent) => {
     e.stopPropagation(); // Prevent row click
     onCancel(task.id);
+  };
+
+  const handleDeleteClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent row click
+    onDelete(task.id);
   };
 
   return (
@@ -76,9 +82,30 @@ const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
         {task.createdAt ? new Date(task.createdAt).toLocaleString() : '-'}
       </td>
       <td style={{ padding: '12px' }}>
-        {canCancel && (
+        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+          {canCancel && (
+            <button
+              onClick={handleCancelClick}
+              style={{
+                display: 'flex',
+                gap: '4px',
+                alignItems: 'center',
+                padding: '4px 8px',
+                border: 'none',
+                borderRadius: '4px',
+                background: '#ef4444',
+                color: 'white',
+                fontSize: '12px',
+                cursor: 'pointer',
+                fontWeight: '500'
+              }}
+              title="Cancel task"
+            >
+              <XCircle size={14} /> Cancel
+            </button>
+          )}
           <button
-            onClick={handleCancelClick}
+            onClick={handleDeleteClick}
             style={{
               display: 'flex',
               gap: '4px',
@@ -86,17 +113,17 @@ const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
               padding: '4px 8px',
               border: 'none',
               borderRadius: '4px',
-              background: '#ef4444',
+              background: '#6b7280',
               color: 'white',
               fontSize: '12px',
               cursor: 'pointer',
               fontWeight: '500'
             }}
-            title="Cancel task"
+            title="Delete task (removes workflow and logs)"
           >
-            <XCircle size={14} /> Cancel
+            <Trash2 size={14} /> Delete
           </button>
-        )}
+        </div>
       </td>
     </tr>
   );
@@ -108,18 +135,20 @@ const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
     prevProps.task.startedAt === nextProps.task.startedAt &&
     prevProps.task.finishedAt === nextProps.task.finishedAt &&
     prevProps.task.createdAt === nextProps.task.createdAt &&
-    prevProps.onCancel === nextProps.onCancel
+    prevProps.onCancel === nextProps.onCancel &&
+    prevProps.onDelete === nextProps.onDelete
   );
 });
 
 TaskRow.displayName = 'TaskRow';
 
 // Memoized TaskTable component
-const TaskTable = React.memo(({ tasks, getPhaseColor, onTaskClick, onCancel }: {
+const TaskTable = React.memo(({ tasks, getPhaseColor, onTaskClick, onCancel, onDelete }: {
   tasks: Task[];
   getPhaseColor: (phase: string) => string;
   onTaskClick: (task: Task) => void;
   onCancel: (taskId: string) => void;
+  onDelete: (taskId: string) => void;
 }) => {
   return (
     <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
@@ -141,6 +170,7 @@ const TaskTable = React.memo(({ tasks, getPhaseColor, onTaskClick, onCancel }: {
             getPhaseColor={getPhaseColor}
             onTaskClick={onTaskClick}
             onCancel={onCancel}
+            onDelete={onDelete}
           />
         ))}
       </tbody>
@@ -169,7 +199,8 @@ const TaskDialog = React.memo(({
   taskLogs, 
   loadingLogs,
   onClose,
-  onCancel
+  onCancel,
+  onDelete
 }: {
   task: Task;
   activeTab: 'code' | 'logs';
@@ -178,6 +209,7 @@ const TaskDialog = React.memo(({
   loadingLogs: boolean;
   onClose: () => void;
   onCancel: (taskId: string) => void;
+  onDelete: (taskId: string) => void;
 }) => {
   const canCancel = task.phase === 'Running' || task.phase === 'Pending';
   
@@ -259,9 +291,29 @@ const TaskDialog = React.memo(({
               </span>
             )}
           </div>
-          {canCancel && (
+          <div style={{ display: 'flex', gap: '10px' }}>
+            {canCancel && (
+              <button
+                onClick={() => onCancel(task.id)}
+                style={{
+                  display: 'flex',
+                  gap: '6px',
+                  alignItems: 'center',
+                  padding: '6px 12px',
+                  border: 'none',
+                  borderRadius: '4px',
+                  background: '#ef4444',
+                  color: 'white',
+                  fontSize: '14px',
+                  cursor: 'pointer',
+                  fontWeight: '500'
+                }}
+              >
+                <XCircle size={16} /> Cancel Task
+              </button>
+            )}
             <button
-              onClick={() => onCancel(task.id)}
+              onClick={() => onDelete(task.id)}
               style={{
                 display: 'flex',
                 gap: '6px',
@@ -269,16 +321,16 @@ const TaskDialog = React.memo(({
                 padding: '6px 12px',
                 border: 'none',
                 borderRadius: '4px',
-                background: '#ef4444',
+                background: '#6b7280',
                 color: 'white',
                 fontSize: '14px',
                 cursor: 'pointer',
                 fontWeight: '500'
               }}
             >
-              <XCircle size={16} /> Cancel Task
+              <Trash2 size={16} /> Delete Task
             </button>
-          )}
+          </div>
         </div>
         
         {/* Tabs */}
@@ -407,7 +459,8 @@ const TaskDialog = React.memo(({
     prevProps.task.pythonCode === nextProps.task.pythonCode &&
     prevProps.activeTab === nextProps.activeTab &&
     prevProps.loadingLogs === nextProps.loadingLogs &&
-    prevProps.onCancel === nextProps.onCancel
+    prevProps.onCancel === nextProps.onCancel &&
+    prevProps.onDelete === nextProps.onDelete
   );
 });
 
@@ -637,11 +690,32 @@ function App() {
     reconnectAttempts.current = 0;
   }, []);
 
+  // Fetch logs via REST API as initial load
+  const fetchLogsViaRest = useCallback(async (taskId: string) => {
+    try {
+      setLoadingLogs(true);
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/logs`);
+      if (res.ok) {
+        const data = await res.json();
+        const logs = data.logs || [];
+        if (logs.length > 0) {
+          setTaskLogs(logs);
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch logs via REST:', error);
+    } finally {
+      setLoadingLogs(false);
+    }
+  }, [apiUrl]);
+
   useEffect(() => {
     if (selectedTask && activeTab === 'logs') {
       // Reset logs hash when switching to logs tab
       lastLogsHashRef.current = '';
-      // Connect WebSocket for real-time logs
+      // First, try to fetch logs via REST API for immediate display
+      fetchLogsViaRest(selectedTask.id);
+      // Then connect WebSocket for real-time updates
       connectWebSocket(selectedTask.id);
       
       return () => {
@@ -654,7 +728,7 @@ function App() {
       setTaskLogs([]);
       lastLogsHashRef.current = '';
     }
-  }, [selectedTaskId, activeTab, selectedTask, connectWebSocket, disconnectWebSocket, logsHash, logsChanged]);
+  }, [selectedTaskId, activeTab, selectedTask, connectWebSocket, disconnectWebSocket, fetchLogsViaRest, logsHash, logsChanged]);
 
   const runTask = async () => {
     try {
@@ -717,6 +791,38 @@ function App() {
     }
   }, [apiUrl, selectedTaskId, fetchTasks, disconnectWebSocket]);
 
+  const deleteTask = useCallback(async (taskId: string) => {
+    if (!confirm('Are you sure you want to delete this task? This will permanently remove the workflow and all its logs from the database.')) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/delete`, {
+        method: 'DELETE',
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to delete task');
+      }
+      
+      // If the deleted task is the selected one, close the dialog
+      if (selectedTaskId === taskId) {
+        setSelectedTaskId(null);
+        setActiveTab('code');
+        setTaskLogs([]);
+        disconnectWebSocket();
+      }
+      
+      // Refresh the task list
+      fetchTasks();
+      alert('Task deleted successfully');
+    } catch (error) {
+      console.error('Failed to delete task:', error);
+      alert('Failed to delete task: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    }
+  }, [apiUrl, selectedTaskId, fetchTasks, disconnectWebSocket]);
+
   return (
     <div style={{ padding: '2rem', fontFamily: 'sans-serif', maxWidth: '1200px', margin: '0 auto' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '2rem' }}>
@@ -767,6 +873,7 @@ function App() {
             getPhaseColor={getPhaseColor}
             onTaskClick={(task) => setSelectedTaskId(task.id)}
             onCancel={cancelTask}
+            onDelete={deleteTask}
           />
         )}
       </div>
@@ -785,6 +892,7 @@ function App() {
             setTaskLogs([]);
           }}
           onCancel={cancelTask}
+          onDelete={deleteTask}
         />
       )}
 
