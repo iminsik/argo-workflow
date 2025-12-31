@@ -202,10 +202,12 @@ const TaskDialog = React.memo(({
           backgroundColor: 'white',
           borderRadius: '8px',
           padding: '2rem',
-          maxWidth: '800px',
+          maxWidth: '900px',
           width: '90%',
-          maxHeight: '80vh',
-          overflow: 'auto',
+          height: '85vh',
+          maxHeight: '85vh',
+          display: 'flex',
+          flexDirection: 'column',
           boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
         }}
         onClick={(e) => e.stopPropagation()}
@@ -312,77 +314,99 @@ const TaskDialog = React.memo(({
         </div>
 
         {/* Tab Content */}
-        {activeTab === 'code' ? (
-          <div style={{
-            backgroundColor: '#1e1e1e',
-            color: '#d4d4d4',
-            padding: '1rem',
-            borderRadius: '4px',
-            fontFamily: 'monospace',
-            fontSize: '14px',
-            whiteSpace: 'pre-wrap',
-            overflow: 'auto',
-            border: '1px solid #3e3e3e',
-            maxHeight: '60vh'
-          }}>
-            {task.pythonCode || 'No Python code available'}
-          </div>
-        ) : (
-          <div style={{
-            backgroundColor: '#1e1e1e',
-            color: '#d4d4d4',
-            padding: '1rem',
-            borderRadius: '4px',
-            fontFamily: 'monospace',
-            fontSize: '14px',
-            whiteSpace: 'pre-wrap',
-            overflow: 'auto',
-            border: '1px solid #3e3e3e',
-            maxHeight: '60vh'
-          }}>
-            {loadingLogs ? (
-              <div style={{ color: '#9ca3af' }}>Loading logs...</div>
-            ) : taskLogs.length === 0 ? (
-              <div style={{ color: '#9ca3af' }}>No logs available yet. The task may still be starting.</div>
-            ) : (
-              taskLogs.map((logEntry, index) => (
-                <div key={index} style={{ marginBottom: '1.5rem' }}>
-                  <div style={{ 
-                    color: '#60a5fa', 
-                    marginBottom: '0.5rem',
-                    paddingBottom: '0.5rem',
-                    borderBottom: '1px solid #374151'
-                  }}>
-                    <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
+        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', minHeight: 0, overflow: 'hidden' }}>
+          {activeTab === 'code' ? (
+            <div style={{
+              backgroundColor: '#1e1e1e',
+              color: '#d4d4d4',
+              padding: '1rem',
+              borderRadius: '4px',
+              fontFamily: 'monospace',
+              fontSize: '14px',
+              whiteSpace: 'pre-wrap',
+              overflow: 'auto',
+              border: '1px solid #3e3e3e',
+              flex: 1,
+              minHeight: 0
+            }}>
+              {task.pythonCode || 'No Python code available'}
+            </div>
+          ) : (
+            <div style={{
+              backgroundColor: '#1e1e1e',
+              color: '#d4d4d4',
+              padding: '1rem',
+              borderRadius: '4px',
+              fontFamily: 'monospace',
+              fontSize: '14px',
+              whiteSpace: 'pre-wrap',
+              overflow: 'auto',
+              border: '1px solid #3e3e3e',
+              flex: 1,
+              minHeight: 0
+            }}>
+              {loadingLogs ? (
+                <div style={{ color: '#9ca3af' }}>Loading logs...</div>
+              ) : taskLogs.length === 0 ? (
+                <div style={{ color: '#9ca3af' }}>No logs available yet. The task may still be starting.</div>
+              ) : (
+                taskLogs.map((logEntry, index) => (
+                  <div key={index} style={{ marginBottom: '1.5rem' }}>
+                    <div style={{ 
+                      color: '#60a5fa', 
+                      marginBottom: '0.5rem',
+                      paddingBottom: '0.5rem',
+                      borderBottom: '1px solid #374151'
+                    }}>
+                      <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
+                    </div>
+                    <div style={{ 
+                      color: '#d4d4d4',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word'
+                    }}>
+                      {logEntry.logs}
+                    </div>
                   </div>
-                  <div style={{ 
-                    color: '#d4d4d4',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word'
-                  }}>
-                    {logEntry.logs}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        )}
+                ))
+              )}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
 }, (prevProps, nextProps) => {
-  // Only re-render if task ID changed, phase changed, activeTab changed, or logs changed
+  // Only re-render if task ID changed, phase changed, activeTab changed, or logs actually changed
+  // Quick check: if lengths differ, logs changed
+  if (prevProps.taskLogs.length !== nextProps.taskLogs.length) {
+    return false; // Re-render needed
+  }
+  
+  // Deep comparison only if on logs tab
+  if (prevProps.activeTab === 'logs' && nextProps.activeTab === 'logs') {
+    // Check if any log entry actually changed
+    const logsChanged = prevProps.taskLogs.some((prevLog, i) => {
+      const nextLog = nextProps.taskLogs[i];
+      return !nextLog || 
+             prevLog.logs !== nextLog.logs || 
+             prevLog.phase !== nextLog.phase ||
+             prevLog.node !== nextLog.node ||
+             prevLog.pod !== nextLog.pod;
+    });
+    
+    if (logsChanged) {
+      return false; // Re-render needed
+    }
+  }
+  
+  // For other changes, use standard comparison
   return (
     prevProps.task.id === nextProps.task.id &&
     prevProps.task.phase === nextProps.task.phase &&
     prevProps.task.pythonCode === nextProps.task.pythonCode &&
     prevProps.activeTab === nextProps.activeTab &&
     prevProps.loadingLogs === nextProps.loadingLogs &&
-    prevProps.taskLogs.length === nextProps.taskLogs.length &&
-    prevProps.taskLogs.every((log, i) => 
-      nextProps.taskLogs[i] && 
-      log.logs === nextProps.taskLogs[i].logs
-    ) &&
     prevProps.onCancel === nextProps.onCancel
   );
 });
@@ -458,18 +482,33 @@ function App() {
 
   useEffect(() => {
     fetchTasks(true);
-    // Refresh every 5 seconds (silently, without loading state)
-    const interval = setInterval(() => fetchTasks(false), 5000);
-    return () => clearInterval(interval);
+    // No automatic refresh - user can manually refresh using the Refresh button
   }, [fetchTasks]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttempts = useRef(0);
   const maxReconnectAttempts = 5;
+  const lastLogsHashRef = useRef<string>('');
+
+  // Helper to create a hash of logs for comparison
+  const logsHash = useCallback((logs: LogEntry[]): string => {
+    return logs.map(l => `${l.node}:${l.pod}:${l.phase}:${l.logs.length}:${l.logs.slice(-100)}`).join('|');
+  }, []);
+
+  // Helper to check if logs actually changed
+  const logsChanged = useCallback((oldLogs: LogEntry[], newLogs: LogEntry[]): boolean => {
+    if (oldLogs.length !== newLogs.length) return true;
+    return oldLogs.some((oldLog, i) => {
+      const newLog = newLogs[i];
+      return !newLog || oldLog.logs !== newLog.logs || oldLog.phase !== newLog.phase;
+    });
+  }, []);
 
   // WebSocket connection for real-time logs
   const connectWebSocket = useCallback((taskId: string) => {
+    // Reset hash when connecting
+    lastLogsHashRef.current = '';
     // Close existing connection if any
     if (wsRef.current) {
       wsRef.current.close();
@@ -503,10 +542,20 @@ function App() {
           const message = JSON.parse(event.data);
           
           if (message.type === 'logs') {
-            setTaskLogs(message.data || []);
+            const newLogs = message.data || [];
+            const newHash = logsHash(newLogs);
+            
+            // Only update if logs actually changed
+            setTaskLogs(prevLogs => {
+              if (newHash !== lastLogsHashRef.current && logsChanged(prevLogs, newLogs)) {
+                lastLogsHashRef.current = newHash;
+                return newLogs;
+              }
+              return prevLogs; // No change, return previous to prevent re-render
+            });
             setLoadingLogs(false);
           } else if (message.type === 'complete') {
-            setTaskLogs(prevLogs => prevLogs); // Keep existing logs
+            // Don't update logs on complete, just stop loading
             setLoadingLogs(false);
             // Optionally close connection when complete
             // ws.close();
@@ -574,7 +623,7 @@ function App() {
         logs: `Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`
       }]);
     }
-  }, [apiUrl, selectedTaskId]);
+  }, [apiUrl, selectedTaskId, logsHash, logsChanged]);
 
   const disconnectWebSocket = useCallback(() => {
     if (wsRef.current) {
@@ -590,6 +639,8 @@ function App() {
 
   useEffect(() => {
     if (selectedTask && activeTab === 'logs') {
+      // Reset logs hash when switching to logs tab
+      lastLogsHashRef.current = '';
       // Connect WebSocket for real-time logs
       connectWebSocket(selectedTask.id);
       
@@ -601,8 +652,9 @@ function App() {
       // Disconnect when switching away from logs tab
       disconnectWebSocket();
       setTaskLogs([]);
+      lastLogsHashRef.current = '';
     }
-  }, [selectedTaskId, activeTab, selectedTask, connectWebSocket, disconnectWebSocket]);
+  }, [selectedTaskId, activeTab, selectedTask, connectWebSocket, disconnectWebSocket, logsHash, logsChanged]);
 
   const runTask = async () => {
     try {
