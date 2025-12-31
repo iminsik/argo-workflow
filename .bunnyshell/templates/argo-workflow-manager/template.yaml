@@ -1,0 +1,4 @@
+name: Argo Workflow Manager
+discoverable: true
+description: Full-stack application for managing and monitoring Argo Workflows with a modern web interface
+
