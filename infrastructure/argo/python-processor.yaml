@@ -14,6 +14,9 @@ spec:
         image: python:3.11-slim
         command: [python, -c]
         args: ["print('Processing task in Kind...')"]
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
         volumeMounts:
           - name: task-results
             mountPath: /mnt/results

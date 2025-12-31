@@ -315,14 +315,17 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                     container_dict = template_dict_copy["container"].copy()
                     # Preserve volumeMounts before creating Container object
                     volume_mounts = container_dict.get("volumeMounts", [])
+                    # Preserve env variables (including ARGO_WORKFLOW_NAME) - remove from dict to avoid type validation
+                    env_vars = container_dict.pop("env", [])
                     # Replace the Python code with the provided code
                     if "args" in container_dict and container_dict["args"]:
                         container_dict["args"] = [request.pythonCode]
                     else:
                         container_dict["args"] = [request.pythonCode]
                     template_dict_copy["container"] = Container(**container_dict)
-                    # Store volumeMounts to add back after serialization
+                    # Store volumeMounts and env to add back after serialization
                     template_dict_copy["_volume_mounts"] = volume_mounts
+                    template_dict_copy["_env"] = env_vars
                 templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
             spec_dict["templates"] = templates
         
@@ -348,19 +351,23 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                 workflow_dict["spec"] = {}
             workflow_dict["spec"]["volumes"] = volumes
         
-        # Ensure volumeMounts are preserved in the container
-        # The Container object might not serialize volumeMounts, so we add them back
+        # Ensure volumeMounts and env are preserved in the container
+        # The Container object might not serialize volumeMounts/env, so we add them back
         if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
             for i, template in enumerate(workflow_dict["spec"]["templates"]):
                 if "container" in template:
-                    # Check if we stored volumeMounts separately
+                    # Check if we stored volumeMounts and env separately
                     original_template = manifest_dict.get("spec", {}).get("templates", [])
                     if original_template and i < len(original_template):
                         original_container = original_template[i].get("container", {})
                         original_volume_mounts = original_container.get("volumeMounts", [])
+                        original_env = original_container.get("env", [])
                         if original_volume_mounts:
                             # Always add volumeMounts back (they might be missing after serialization)
                             template["container"]["volumeMounts"] = original_volume_mounts
+                        if original_env:
+                            # Always add env back (they might be missing after serialization)
+                            template["container"]["env"] = original_env
         
         # Create workflow using Kubernetes CustomObjectsApi
         # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
