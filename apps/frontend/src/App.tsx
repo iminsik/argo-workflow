@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Play, RefreshCw, X } from 'lucide-react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { Play, RefreshCw, X, XCircle } from 'lucide-react';
 import Editor from '@monaco-editor/react';
 
 interface Task {
@@ -19,10 +19,364 @@ interface LogEntry {
   logs: string;
 }
 
+// Memoized TaskRow component to prevent unnecessary re-renders
+const TaskRow = React.memo(({ task, getPhaseColor, onTaskClick, onCancel }: {
+  task: Task;
+  getPhaseColor: (phase: string) => string;
+  onTaskClick: (task: Task) => void;
+  onCancel: (taskId: string) => void;
+}) => {
+  const canCancel = task.phase === 'Running' || task.phase === 'Pending';
+  
+  const handleMouseEnter = (e: React.MouseEvent<HTMLTableRowElement>) => {
+    e.currentTarget.style.backgroundColor = '#f9fafb';
+  };
+
+  const handleMouseLeave = (e: React.MouseEvent<HTMLTableRowElement>) => {
+    e.currentTarget.style.backgroundColor = 'transparent';
+  };
+
+  const handleCancelClick = (e: React.MouseEvent) => {
+    e.stopPropagation(); // Prevent row click
+    onCancel(task.id);
+  };
+
+  return (
+    <tr 
+      style={{ 
+        borderBottom: '1px solid #e5e7eb',
+        cursor: 'pointer',
+        transition: 'background-color 0.2s'
+      }}
+      onClick={() => onTaskClick(task)}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
+    >
+      <td style={{ padding: '12px', fontFamily: 'monospace' }}>{task.id}</td>
+      <td style={{ padding: '12px' }}>
+        <span style={{
+          padding: '4px 8px',
+          borderRadius: '4px',
+          background: getPhaseColor(task.phase),
+          color: 'white',
+          fontSize: '12px',
+          fontWeight: 'bold'
+        }}>
+          {task.phase || 'Unknown'}
+        </span>
+      </td>
+      <td style={{ padding: '12px' }}>
+        {task.startedAt ? new Date(task.startedAt).toLocaleString() : '-'}
+      </td>
+      <td style={{ padding: '12px' }}>
+        {task.finishedAt ? new Date(task.finishedAt).toLocaleString() : '-'}
+      </td>
+      <td style={{ padding: '12px' }}>
+        {task.createdAt ? new Date(task.createdAt).toLocaleString() : '-'}
+      </td>
+      <td style={{ padding: '12px' }}>
+        {canCancel && (
+          <button
+            onClick={handleCancelClick}
+            style={{
+              display: 'flex',
+              gap: '4px',
+              alignItems: 'center',
+              padding: '4px 8px',
+              border: 'none',
+              borderRadius: '4px',
+              background: '#ef4444',
+              color: 'white',
+              fontSize: '12px',
+              cursor: 'pointer',
+              fontWeight: '500'
+            }}
+            title="Cancel task"
+          >
+            <XCircle size={14} /> Cancel
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}, (prevProps, nextProps) => {
+  // Custom comparison function - only re-render if task data actually changed
+  return (
+    prevProps.task.id === nextProps.task.id &&
+    prevProps.task.phase === nextProps.task.phase &&
+    prevProps.task.startedAt === nextProps.task.startedAt &&
+    prevProps.task.finishedAt === nextProps.task.finishedAt &&
+    prevProps.task.createdAt === nextProps.task.createdAt &&
+    prevProps.onCancel === nextProps.onCancel
+  );
+});
+
+TaskRow.displayName = 'TaskRow';
+
+// Memoized TaskTable component
+const TaskTable = React.memo(({ tasks, getPhaseColor, onTaskClick, onCancel }: {
+  tasks: Task[];
+  getPhaseColor: (phase: string) => string;
+  onTaskClick: (task: Task) => void;
+  onCancel: (taskId: string) => void;
+}) => {
+  return (
+    <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
+      <thead>
+        <tr style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left' }}>
+          <th style={{ padding: '12px' }}>ID</th>
+          <th style={{ padding: '12px' }}>Phase</th>
+          <th style={{ padding: '12px' }}>Started</th>
+          <th style={{ padding: '12px' }}>Finished</th>
+          <th style={{ padding: '12px' }}>Created</th>
+          <th style={{ padding: '12px' }}>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {tasks.map((task) => (
+          <TaskRow
+            key={task.id}
+            task={task}
+            getPhaseColor={getPhaseColor}
+            onTaskClick={onTaskClick}
+            onCancel={onCancel}
+          />
+        ))}
+      </tbody>
+    </table>
+  );
+});
+
+TaskTable.displayName = 'TaskTable';
+
+// Stable function outside component to prevent re-renders
+const getPhaseColor = (phase: string) => {
+  switch (phase) {
+    case 'Succeeded': return '#10b981';
+    case 'Failed': return '#ef4444';
+    case 'Running': return '#3b82f6';
+    case 'Pending': return '#f59e0b';
+    default: return '#6b7280';
+  }
+};
+
+// Memoized TaskDialog component to prevent flickering
+const TaskDialog = React.memo(({ 
+  task, 
+  activeTab, 
+  setActiveTab, 
+  taskLogs, 
+  loadingLogs,
+  onClose,
+  onCancel
+}: {
+  task: Task;
+  activeTab: 'code' | 'logs';
+  setActiveTab: (tab: 'code' | 'logs') => void;
+  taskLogs: LogEntry[];
+  loadingLogs: boolean;
+  onClose: () => void;
+  onCancel: (taskId: string) => void;
+}) => {
+  const canCancel = task.phase === 'Running' || task.phase === 'Pending';
+  
+  return (
+    <div 
+      style={{
+        position: 'fixed',
+        top: 0,
+        left: 0,
+        right: 0,
+        bottom: 0,
+        backgroundColor: 'rgba(0, 0, 0, 0.5)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        zIndex: 1000
+      }}
+      onClick={onClose}
+    >
+      <div 
+        style={{
+          backgroundColor: 'white',
+          borderRadius: '8px',
+          padding: '2rem',
+          maxWidth: '800px',
+          width: '90%',
+          maxHeight: '80vh',
+          overflow: 'auto',
+          boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
+          <h2 style={{ margin: 0 }}>Task Details - {task.id}</h2>
+          <button
+            onClick={onClose}
+            style={{
+              background: 'none',
+              border: 'none',
+              fontSize: '24px',
+              cursor: 'pointer',
+              color: '#6b7280',
+              padding: '0',
+              width: '30px',
+              height: '30px',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center'
+            }}
+          >
+            ×
+          </button>
+        </div>
+        <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'space-between' }}>
+          <span style={{
+            padding: '4px 8px',
+            borderRadius: '4px',
+            background: getPhaseColor(task.phase),
+            color: 'white',
+            fontSize: '12px',
+            fontWeight: 'bold'
+          }}>
+            {task.phase || 'Unknown'}
+          </span>
+          {canCancel && (
+            <button
+              onClick={() => onCancel(task.id)}
+              style={{
+                display: 'flex',
+                gap: '6px',
+                alignItems: 'center',
+                padding: '6px 12px',
+                border: 'none',
+                borderRadius: '4px',
+                background: '#ef4444',
+                color: 'white',
+                fontSize: '14px',
+                cursor: 'pointer',
+                fontWeight: '500'
+              }}
+            >
+              <XCircle size={16} /> Cancel Task
+            </button>
+          )}
+        </div>
+        
+        {/* Tabs */}
+        <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', marginBottom: '1rem' }}>
+          <button
+            onClick={() => setActiveTab('code')}
+            style={{
+              padding: '10px 20px',
+              border: 'none',
+              background: 'none',
+              cursor: 'pointer',
+              borderBottom: activeTab === 'code' ? '2px solid #3b82f6' : '2px solid transparent',
+              color: activeTab === 'code' ? '#3b82f6' : '#6b7280',
+              fontWeight: activeTab === 'code' ? 'bold' : 'normal'
+            }}
+          >
+            Code
+          </button>
+          <button
+            onClick={() => setActiveTab('logs')}
+            style={{
+              padding: '10px 20px',
+              border: 'none',
+              background: 'none',
+              cursor: 'pointer',
+              borderBottom: activeTab === 'logs' ? '2px solid #3b82f6' : '2px solid transparent',
+              color: activeTab === 'logs' ? '#3b82f6' : '#6b7280',
+              fontWeight: activeTab === 'logs' ? 'bold' : 'normal'
+            }}
+          >
+            Logs {loadingLogs && '...'}
+          </button>
+        </div>
+
+        {/* Tab Content */}
+        {activeTab === 'code' ? (
+          <div style={{
+            backgroundColor: '#1e1e1e',
+            color: '#d4d4d4',
+            padding: '1rem',
+            borderRadius: '4px',
+            fontFamily: 'monospace',
+            fontSize: '14px',
+            whiteSpace: 'pre-wrap',
+            overflow: 'auto',
+            border: '1px solid #3e3e3e',
+            maxHeight: '60vh'
+          }}>
+            {task.pythonCode || 'No Python code available'}
+          </div>
+        ) : (
+          <div style={{
+            backgroundColor: '#1e1e1e',
+            color: '#d4d4d4',
+            padding: '1rem',
+            borderRadius: '4px',
+            fontFamily: 'monospace',
+            fontSize: '14px',
+            whiteSpace: 'pre-wrap',
+            overflow: 'auto',
+            border: '1px solid #3e3e3e',
+            maxHeight: '60vh'
+          }}>
+            {loadingLogs ? (
+              <div style={{ color: '#9ca3af' }}>Loading logs...</div>
+            ) : taskLogs.length === 0 ? (
+              <div style={{ color: '#9ca3af' }}>No logs available yet. The task may still be starting.</div>
+            ) : (
+              taskLogs.map((logEntry, index) => (
+                <div key={index} style={{ marginBottom: '1.5rem' }}>
+                  <div style={{ 
+                    color: '#60a5fa', 
+                    marginBottom: '0.5rem',
+                    paddingBottom: '0.5rem',
+                    borderBottom: '1px solid #374151'
+                  }}>
+                    <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
+                  </div>
+                  <div style={{ 
+                    color: '#d4d4d4',
+                    whiteSpace: 'pre-wrap',
+                    wordBreak: 'break-word'
+                  }}>
+                    {logEntry.logs}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}, (prevProps, nextProps) => {
+  // Only re-render if task ID changed, phase changed, activeTab changed, or logs changed
+  return (
+    prevProps.task.id === nextProps.task.id &&
+    prevProps.task.phase === nextProps.task.phase &&
+    prevProps.task.pythonCode === nextProps.task.pythonCode &&
+    prevProps.activeTab === nextProps.activeTab &&
+    prevProps.loadingLogs === nextProps.loadingLogs &&
+    prevProps.taskLogs.length === nextProps.taskLogs.length &&
+    prevProps.taskLogs.every((log, i) => 
+      nextProps.taskLogs[i] && 
+      log.logs === nextProps.taskLogs[i].logs
+    ) &&
+    prevProps.onCancel === nextProps.onCancel
+  );
+});
+
+TaskDialog.displayName = 'TaskDialog';
+
 function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<'code' | 'logs'>('code');
   const [taskLogs, setTaskLogs] = useState<LogEntry[]>([]);
   const [loadingLogs, setLoadingLogs] = useState(false);
@@ -31,60 +385,208 @@ function App() {
   const [submitting, setSubmitting] = useState(false);
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
-  const fetchTasks = async () => {
+  // Get selected task from tasks array by ID (stable reference)
+  const selectedTask = useMemo(() => {
+    if (!selectedTaskId) return null;
+    return tasks.find(t => t.id === selectedTaskId) || null;
+  }, [selectedTaskId, tasks]);
+
+  // Helper function to check if tasks have changed
+  const tasksChanged = (oldTasks: Task[], newTasks: Task[]): boolean => {
+    if (oldTasks.length !== newTasks.length) return true;
+    
+    // Create maps for quick comparison
+    const oldMap = new Map(oldTasks.map(t => [t.id, t]));
+    
+    for (const newTask of newTasks) {
+      const oldTask = oldMap.get(newTask.id);
+      if (!oldTask) return true;
+      
+      // Compare relevant fields that might change
+      if (
+        oldTask.phase !== newTask.phase ||
+        oldTask.startedAt !== newTask.startedAt ||
+        oldTask.finishedAt !== newTask.finishedAt
+      ) {
+        return true;
+      }
+    }
+    
+    return false;
+  };
+
+  const fetchTasks = useCallback(async (isInitial = false) => {
     try {
-      setLoading(true);
+      if (isInitial) {
+        setInitialLoading(true);
+      }
       const res = await fetch(`${apiUrl}/api/v1/tasks`);
       const data = await res.json();
-      setTasks(data.tasks || []);
+      const newTasks = data.tasks || [];
+      
+      // Only update state if tasks actually changed
+      setTasks(prevTasks => {
+        if (tasksChanged(prevTasks, newTasks)) {
+          return newTasks;
+        }
+        return prevTasks; // Return previous to prevent re-render
+      });
     } catch (error) {
       console.error('Failed to fetch tasks:', error);
     } finally {
-      setLoading(false);
+      if (isInitial) {
+        setInitialLoading(false);
+      }
     }
-  };
+  }, [apiUrl]);
 
   useEffect(() => {
-    fetchTasks();
-    // Refresh every 5 seconds
-    const interval = setInterval(fetchTasks, 5000);
+    fetchTasks(true);
+    // Refresh every 5 seconds (silently, without loading state)
+    const interval = setInterval(() => fetchTasks(false), 5000);
     return () => clearInterval(interval);
-  }, []);
+  }, [fetchTasks]);
 
-  const fetchTaskLogs = async (taskId: string) => {
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const reconnectAttempts = useRef(0);
+  const maxReconnectAttempts = 5;
+
+  // WebSocket connection for real-time logs
+  const connectWebSocket = useCallback((taskId: string) => {
+    // Close existing connection if any
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+
+    // Clear any pending reconnection
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+
+    // Convert http:// to ws:// or https:// to wss://
+    const wsUrl = apiUrl.replace(/^http/, 'ws') + `/ws/tasks/${taskId}/logs`;
+    
+    setLoadingLogs(true);
+    reconnectAttempts.current = 0;
+
     try {
-      setLoadingLogs(true);
-      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/logs`);
-      if (!res.ok) {
-        throw new Error('Failed to fetch logs');
-      }
-      const data = await res.json();
-      setTaskLogs(data.logs || []);
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        console.log('WebSocket connected for task:', taskId);
+        setLoadingLogs(false);
+        reconnectAttempts.current = 0;
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const message = JSON.parse(event.data);
+          
+          if (message.type === 'logs') {
+            setTaskLogs(message.data || []);
+            setLoadingLogs(false);
+          } else if (message.type === 'complete') {
+            setTaskLogs(prevLogs => prevLogs); // Keep existing logs
+            setLoadingLogs(false);
+            // Optionally close connection when complete
+            // ws.close();
+          } else if (message.type === 'error') {
+            console.error('WebSocket error:', message.message);
+            setTaskLogs(prevLogs => {
+              if (prevLogs.length === 0) {
+                return [{
+                  node: 'error',
+                  pod: 'N/A',
+                  phase: 'Error',
+                  logs: `Error: ${message.message}`
+                }];
+              }
+              return prevLogs;
+            });
+            setLoadingLogs(false);
+          }
+        } catch (error) {
+          console.error('Failed to parse WebSocket message:', error);
+        }
+      };
+
+      ws.onerror = (error) => {
+        console.error('WebSocket error:', error);
+        setLoadingLogs(false);
+      };
+
+      ws.onclose = (event) => {
+        console.log('WebSocket closed:', event.code, event.reason);
+        wsRef.current = null;
+        
+        // Only attempt reconnection if not a normal closure and we have a selected task
+        if (event.code !== 1000 && selectedTaskId === taskId && reconnectAttempts.current < maxReconnectAttempts) {
+          reconnectAttempts.current += 1;
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttempts.current), 10000); // Exponential backoff, max 10s
+          
+          console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempts.current}/${maxReconnectAttempts})...`);
+          
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connectWebSocket(taskId);
+          }, delay);
+        } else if (reconnectAttempts.current >= maxReconnectAttempts) {
+          setTaskLogs(prevLogs => {
+            if (prevLogs.length === 0) {
+              return [{
+                node: 'error',
+                pod: 'N/A',
+                phase: 'Error',
+                logs: 'Connection lost. Maximum reconnection attempts reached.'
+              }];
+            }
+            return prevLogs;
+          });
+          setLoadingLogs(false);
+        }
+      };
     } catch (error) {
-      console.error('Failed to fetch logs:', error);
+      console.error('Failed to create WebSocket:', error);
+      setLoadingLogs(false);
       setTaskLogs([{
         node: 'error',
         pod: 'N/A',
         phase: 'Error',
-        logs: `Error fetching logs: ${error instanceof Error ? error.message : 'Unknown error'}`
+        logs: `Failed to connect: ${error instanceof Error ? error.message : 'Unknown error'}`
       }]);
-    } finally {
-      setLoadingLogs(false);
     }
-  };
+  }, [apiUrl, selectedTaskId]);
+
+  const disconnectWebSocket = useCallback(() => {
+    if (wsRef.current) {
+      wsRef.current.close();
+      wsRef.current = null;
+    }
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    reconnectAttempts.current = 0;
+  }, []);
 
   useEffect(() => {
     if (selectedTask && activeTab === 'logs') {
-      fetchTaskLogs(selectedTask.id);
-      // Refresh logs every 3 seconds if task is still running
-      const interval = setInterval(() => {
-        if (selectedTask && (selectedTask.phase === 'Running' || selectedTask.phase === 'Pending')) {
-          fetchTaskLogs(selectedTask.id);
-        }
-      }, 3000);
-      return () => clearInterval(interval);
+      // Connect WebSocket for real-time logs
+      connectWebSocket(selectedTask.id);
+      
+      return () => {
+        // Cleanup: disconnect WebSocket when switching tabs or closing dialog
+        disconnectWebSocket();
+      };
+    } else {
+      // Disconnect when switching away from logs tab
+      disconnectWebSocket();
+      setTaskLogs([]);
     }
-  }, [selectedTask, activeTab]);
+  }, [selectedTaskId, activeTab, selectedTask, connectWebSocket, disconnectWebSocket]);
 
   const runTask = async () => {
     try {
@@ -115,15 +617,37 @@ function App() {
     }
   };
 
-  const getPhaseColor = (phase: string) => {
-    switch (phase) {
-      case 'Succeeded': return '#10b981';
-      case 'Failed': return '#ef4444';
-      case 'Running': return '#3b82f6';
-      case 'Pending': return '#f59e0b';
-      default: return '#6b7280';
+  const cancelTask = useCallback(async (taskId: string) => {
+    if (!confirm('Are you sure you want to cancel this task?')) {
+      return;
     }
-  };
+
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}`, {
+        method: 'DELETE',
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to cancel task');
+      }
+      
+      // If the cancelled task is the selected one, close the dialog
+      if (selectedTaskId === taskId) {
+        setSelectedTaskId(null);
+        setActiveTab('code');
+        setTaskLogs([]);
+        disconnectWebSocket();
+      }
+      
+      // Refresh the task list
+      fetchTasks();
+      alert('Task cancelled successfully');
+    } catch (error) {
+      console.error('Failed to cancel task:', error);
+      alert('Failed to cancel task: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    }
+  }, [apiUrl, selectedTaskId, fetchTasks, disconnectWebSocket]);
 
   return (
     <div style={{ padding: '2rem', fontFamily: 'sans-serif', maxWidth: '1200px', margin: '0 auto' }}>
@@ -131,8 +655,8 @@ function App() {
         <h1>Argo Workflow Manager</h1>
         <div style={{ display: 'flex', gap: '10px' }}>
           <button 
-            onClick={fetchTasks} 
-            disabled={loading}
+            onClick={() => fetchTasks(true)} 
+            disabled={initialLoading}
             style={{ 
               display: 'flex', 
               gap: '8px', 
@@ -165,225 +689,35 @@ function App() {
 
       <div style={{ marginTop: '2rem' }}>
         <h2>Submitted Tasks</h2>
-        {loading && tasks.length === 0 ? (
+        {initialLoading && tasks.length === 0 ? (
           <p>Loading tasks...</p>
         ) : tasks.length === 0 ? (
           <p>No tasks found. Submit a task to get started.</p>
         ) : (
-          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: '1rem' }}>
-            <thead>
-              <tr style={{ borderBottom: '2px solid #e5e7eb', textAlign: 'left' }}>
-                <th style={{ padding: '12px' }}>ID</th>
-                <th style={{ padding: '12px' }}>Phase</th>
-                <th style={{ padding: '12px' }}>Started</th>
-                <th style={{ padding: '12px' }}>Finished</th>
-                <th style={{ padding: '12px' }}>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tasks.map((task) => (
-                <tr 
-                  key={task.id} 
-                  style={{ 
-                    borderBottom: '1px solid #e5e7eb',
-                    cursor: 'pointer',
-                    transition: 'background-color 0.2s'
-                  }}
-                  onClick={() => setSelectedTask(task)}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.backgroundColor = '#f9fafb';
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.backgroundColor = 'transparent';
-                  }}
-                >
-                  <td style={{ padding: '12px', fontFamily: 'monospace' }}>{task.id}</td>
-                  <td style={{ padding: '12px' }}>
-                    <span style={{
-                      padding: '4px 8px',
-                      borderRadius: '4px',
-                      background: getPhaseColor(task.phase),
-                      color: 'white',
-                      fontSize: '12px',
-                      fontWeight: 'bold'
-                    }}>
-                      {task.phase || 'Unknown'}
-                    </span>
-                  </td>
-                  <td style={{ padding: '12px' }}>
-                    {task.startedAt ? new Date(task.startedAt).toLocaleString() : '-'}
-                  </td>
-                  <td style={{ padding: '12px' }}>
-                    {task.finishedAt ? new Date(task.finishedAt).toLocaleString() : '-'}
-                  </td>
-                  <td style={{ padding: '12px' }}>
-                    {task.createdAt ? new Date(task.createdAt).toLocaleString() : '-'}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <TaskTable 
+            tasks={tasks} 
+            getPhaseColor={getPhaseColor}
+            onTaskClick={(task) => setSelectedTaskId(task.id)}
+            onCancel={cancelTask}
+          />
         )}
       </div>
 
-      {/* Modal for displaying Python code */}
+      {/* Modal for displaying task details */}
       {selectedTask && (
-        <div 
-          style={{
-            position: 'fixed',
-            top: 0,
-            left: 0,
-            right: 0,
-            bottom: 0,
-            backgroundColor: 'rgba(0, 0, 0, 0.5)',
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            zIndex: 1000
+        <TaskDialog
+          task={selectedTask}
+          activeTab={activeTab}
+          setActiveTab={setActiveTab}
+          taskLogs={taskLogs}
+          loadingLogs={loadingLogs}
+          onClose={() => {
+            setSelectedTaskId(null);
+            setActiveTab('code');
+            setTaskLogs([]);
           }}
-          onClick={() => setSelectedTask(null)}
-        >
-          <div 
-            style={{
-              backgroundColor: 'white',
-              borderRadius: '8px',
-              padding: '2rem',
-              maxWidth: '800px',
-              width: '90%',
-              maxHeight: '80vh',
-              overflow: 'auto',
-              boxShadow: '0 4px 6px rgba(0, 0, 0, 0.1)'
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-              <h2 style={{ margin: 0 }}>Task Details - {selectedTask.id}</h2>
-              <button
-                onClick={() => {
-                  setSelectedTask(null);
-                  setActiveTab('code');
-                  setTaskLogs([]);
-                }}
-                style={{
-                  background: 'none',
-                  border: 'none',
-                  fontSize: '24px',
-                  cursor: 'pointer',
-                  color: '#6b7280',
-                  padding: '0',
-                  width: '30px',
-                  height: '30px',
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'center'
-                }}
-              >
-                ×
-              </button>
-            </div>
-            <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', alignItems: 'center' }}>
-              <span style={{
-                padding: '4px 8px',
-                borderRadius: '4px',
-                background: getPhaseColor(selectedTask.phase),
-                color: 'white',
-                fontSize: '12px',
-                fontWeight: 'bold'
-              }}>
-                {selectedTask.phase || 'Unknown'}
-              </span>
-            </div>
-            
-            {/* Tabs */}
-            <div style={{ display: 'flex', borderBottom: '1px solid #e5e7eb', marginBottom: '1rem' }}>
-              <button
-                onClick={() => setActiveTab('code')}
-                style={{
-                  padding: '10px 20px',
-                  border: 'none',
-                  background: 'none',
-                  cursor: 'pointer',
-                  borderBottom: activeTab === 'code' ? '2px solid #3b82f6' : '2px solid transparent',
-                  color: activeTab === 'code' ? '#3b82f6' : '#6b7280',
-                  fontWeight: activeTab === 'code' ? 'bold' : 'normal'
-                }}
-              >
-                Code
-              </button>
-              <button
-                onClick={() => setActiveTab('logs')}
-                style={{
-                  padding: '10px 20px',
-                  border: 'none',
-                  background: 'none',
-                  cursor: 'pointer',
-                  borderBottom: activeTab === 'logs' ? '2px solid #3b82f6' : '2px solid transparent',
-                  color: activeTab === 'logs' ? '#3b82f6' : '#6b7280',
-                  fontWeight: activeTab === 'logs' ? 'bold' : 'normal'
-                }}
-              >
-                Logs {loadingLogs && '...'}
-              </button>
-            </div>
-
-            {/* Tab Content */}
-            {activeTab === 'code' ? (
-              <div style={{
-                backgroundColor: '#1e1e1e',
-                color: '#d4d4d4',
-                padding: '1rem',
-                borderRadius: '4px',
-                fontFamily: 'monospace',
-                fontSize: '14px',
-                whiteSpace: 'pre-wrap',
-                overflow: 'auto',
-                border: '1px solid #3e3e3e',
-                maxHeight: '60vh'
-              }}>
-                {selectedTask.pythonCode || 'No Python code available'}
-              </div>
-            ) : (
-              <div style={{
-                backgroundColor: '#1e1e1e',
-                color: '#d4d4d4',
-                padding: '1rem',
-                borderRadius: '4px',
-                fontFamily: 'monospace',
-                fontSize: '14px',
-                whiteSpace: 'pre-wrap',
-                overflow: 'auto',
-                border: '1px solid #3e3e3e',
-                maxHeight: '60vh'
-              }}>
-                {loadingLogs ? (
-                  <div style={{ color: '#9ca3af' }}>Loading logs...</div>
-                ) : taskLogs.length === 0 ? (
-                  <div style={{ color: '#9ca3af' }}>No logs available yet. The task may still be starting.</div>
-                ) : (
-                  taskLogs.map((logEntry, index) => (
-                    <div key={index} style={{ marginBottom: '1.5rem' }}>
-                      <div style={{ 
-                        color: '#60a5fa', 
-                        marginBottom: '0.5rem',
-                        paddingBottom: '0.5rem',
-                        borderBottom: '1px solid #374151'
-                      }}>
-                        <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
-                      </div>
-                      <div style={{ 
-                        color: '#d4d4d4',
-                        whiteSpace: 'pre-wrap',
-                        wordBreak: 'break-word'
-                      }}>
-                        {logEntry.logs}
-                      </div>
-                    </div>
-                  ))
-                )}
-              </div>
-            )}
-          </div>
-        </div>
+          onCancel={cancelTask}
+        />
       )}
 
       {/* Modal for submitting new task with code editor */}

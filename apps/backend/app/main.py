@@ -1,5 +1,5 @@
-import yaml, os
-from fastapi import FastAPI, HTTPException
+import yaml, os, asyncio, json
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kubernetes import config
@@ -281,6 +281,154 @@ async def get_task_logs(task_id: str):
     except Exception as e:
         import traceback
         traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.websocket("/ws/tasks/{task_id}/logs")
+async def websocket_logs(websocket: WebSocket, task_id: str):
+    await websocket.accept()
+    namespace = os.getenv("ARGO_NAMESPACE", "argo")
+    core_api = CoreV1Api()
+    custom_api = CustomObjectsApi()
+    
+    last_logs_hash = ""
+    last_sent_logs = []
+    
+    try:
+        while True:
+            try:
+                # Get workflow status
+                workflow = custom_api.get_namespaced_custom_object(
+                    group="argoproj.io",
+                    version="v1alpha1",
+                    namespace=namespace,
+                    plural="workflows",
+                    name=task_id
+                )
+                
+                status = workflow.get("status", {})
+                nodes = status.get("nodes", {})
+                phase = status.get("phase", "Unknown")
+                
+                # Collect logs from all nodes
+                all_logs = []
+                
+                for node_id, node_info in nodes.items():
+                    node_type = node_info.get("type", "")
+                    node_phase = node_info.get("phase", "")
+                    
+                    if node_type == "Pod":
+                        pod_name = (
+                            node_info.get("displayName") or 
+                            node_info.get("id") or 
+                            node_id
+                        )
+                        
+                        try:
+                            try:
+                                logs = core_api.read_namespaced_pod_log(
+                                    name=pod_name,
+                                    namespace=namespace,
+                                    tail_lines=1000
+                                )
+                            except:
+                                label_selector = f"workflows.argoproj.io/workflow={task_id}"
+                                pods = core_api.list_namespaced_pod(
+                                    namespace=namespace,
+                                    label_selector=label_selector
+                                )
+                                
+                                if pods.items:
+                                    actual_pod_name = pods.items[0].metadata.name
+                                    logs = core_api.read_namespaced_pod_log(
+                                        name=actual_pod_name,
+                                        namespace=namespace,
+                                        tail_lines=1000
+                                    )
+                                    pod_name = actual_pod_name
+                                else:
+                                    raise Exception("No pods found for workflow")
+                            
+                            all_logs.append({
+                                "node": node_id,
+                                "pod": pod_name,
+                                "phase": node_phase,
+                                "logs": logs
+                            })
+                        except Exception as e:
+                            all_logs.append({
+                                "node": node_id,
+                                "pod": pod_name,
+                                "phase": node_phase,
+                                "logs": f"Error fetching logs: {str(e)}"
+                            })
+                
+                # Create hash to check if logs changed
+                logs_hash = json.dumps(all_logs, sort_keys=True)
+                
+                # Only send if logs changed
+                if logs_hash != last_logs_hash:
+                    last_logs_hash = logs_hash
+                    last_sent_logs = all_logs
+                    
+                    await websocket.send_json({
+                        "type": "logs",
+                        "data": all_logs,
+                        "workflow_phase": phase
+                    })
+                
+                # Check if workflow is finished
+                if phase in ["Succeeded", "Failed", "Error"]:
+                    await websocket.send_json({
+                        "type": "complete",
+                        "workflow_phase": phase
+                    })
+                    # Keep connection open for a bit, then close
+                    await asyncio.sleep(2)
+                    break
+                
+                # Wait before next check
+                await asyncio.sleep(2)
+                
+            except Exception as e:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": str(e)
+                })
+                await asyncio.sleep(2)
+                
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        try:
+            await websocket.send_json({
+                "type": "error",
+                "message": f"Connection error: {str(e)}"
+            })
+        except:
+            pass
+
+@app.delete("/api/v1/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        api_instance = CustomObjectsApi()
+        
+        # Delete the workflow
+        api_instance.delete_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workflows",
+            name=task_id
+        )
+        
+        return {"status": "cancelled", "id": task_id}
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        # Check if it's a 404 (workflow not found)
+        if "404" in str(e) or "Not Found" in str(e):
+            raise HTTPException(status_code=404, detail=f"Workflow {task_id} not found")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/v1/tasks/callback")
