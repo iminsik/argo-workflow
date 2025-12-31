@@ -38,6 +38,19 @@ This repository is configured for deployment on [Bunnyshell](https://bunnyshell.
 - Configure RBAC for Argo Workflows access
 - Update `CORS_ORIGINS` for production use
 
+**Prerequisites:**
+- A Bunnyshell account
+- A Kubernetes cluster connected to Bunnyshell
+- Git repository connected to Bunnyshell
+
+**Deployment Steps:**
+1. Connect your repository to Bunnyshell
+2. Ensure your Kubernetes cluster is connected
+3. Deploy the environment using the `bunnyshell.yaml` configuration
+4. Configure environment variables as needed (especially `CORS_ORIGINS` for production)
+
+**Note:** Make sure to update the `CORS_ORIGINS` environment variable in the backend component to match your frontend URL in production.
+
 ### For End Users
 
 See [USER.md](./USER.md) for how to use the application.

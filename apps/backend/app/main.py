@@ -28,9 +28,10 @@ async def startup_event():
         print(f"Warning: Could not initialize database: {e}. Logs will not be persisted.")
 
 # Configure CORS
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Frontend origins
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -97,16 +98,10 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                 )
                 
                 try:
-                    # First try with the displayName/id directly
+                    # First, try to get the actual pod to check its status
+                    actual_pod = None
                     try:
-                        logs = core_api.read_namespaced_pod_log(
-                            name=pod_name,
-                            namespace=namespace,
-                            container="main",
-                            tail_lines=1000
-                        )
-                    except:
-                        # If that fails, try to find the pod by label selector
+                        # Try to find the pod by label selector first
                         label_selector = f"workflows.argoproj.io/workflow={task_id}"
                         pods = core_api.list_namespaced_pod(
                             namespace=namespace,
@@ -114,16 +109,60 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                         )
                         
                         if pods.items:
-                            actual_pod_name = pods.items[0].metadata.name
-                            logs = core_api.read_namespaced_pod_log(
-                                name=actual_pod_name,
+                            actual_pod = pods.items[0]
+                            pod_name = actual_pod.metadata.name
+                    except:
+                        pass
+                    
+                    # Check if pod is ready before trying to fetch logs
+                    if actual_pod:
+                        pod_phase = actual_pod.status.phase if actual_pod.status else None
+                        # If pod is still initializing or pending, skip log fetch (not an error)
+                        if pod_phase in ["Pending"]:
+                            # Pod is still starting - this is normal, don't add error
+                            continue
+                    
+                    # Try to fetch logs
+                    try:
+                        logs = core_api.read_namespaced_pod_log(
+                            name=pod_name,
+                            namespace=namespace,
+                            container="main",
+                            tail_lines=1000
+                        )
+                    except Exception as log_error:
+                        # Check if it's a "PodInitializing" or "waiting to start" error
+                        error_str = str(log_error)
+                        if "PodInitializing" in error_str or "waiting to start" in error_str:
+                            # Pod is still initializing - this is normal, skip silently
+                            continue
+                        # If that fails and we don't have the pod yet, try to find it
+                        if not actual_pod:
+                            label_selector = f"workflows.argoproj.io/workflow={task_id}"
+                            pods = core_api.list_namespaced_pod(
                                 namespace=namespace,
-                                container="main",
-                                tail_lines=1000
+                                label_selector=label_selector
                             )
-                            pod_name = actual_pod_name
+                            
+                            if pods.items:
+                                actual_pod = pods.items[0]
+                                actual_pod_name = actual_pod.metadata.name
+                                # Check pod phase again
+                                pod_phase = actual_pod.status.phase if actual_pod.status else None
+                                if pod_phase in ["Pending"]:
+                                    continue
+                                
+                                logs = core_api.read_namespaced_pod_log(
+                                    name=actual_pod_name,
+                                    namespace=namespace,
+                                    container="main",
+                                    tail_lines=1000
+                                )
+                                pod_name = actual_pod_name
+                            else:
+                                raise Exception("No pods found for workflow")
                         else:
-                            raise Exception("No pods found for workflow")
+                            raise log_error
                     
                     all_logs.append({
                         "node": node_id,
@@ -132,12 +171,15 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                         "logs": logs
                     })
                 except Exception as e:
-                    all_logs.append({
-                        "node": node_id,
-                        "pod": pod_name,
-                        "phase": phase,
-                        "logs": f"Error fetching logs: {str(e)}"
-                    })
+                    error_str = str(e)
+                    # Only add error message for actual errors, not for pods that are still starting
+                    if "PodInitializing" not in error_str and "waiting to start" not in error_str:
+                        all_logs.append({
+                            "node": node_id,
+                            "pod": pod_name,
+                            "phase": phase,
+                            "logs": f"Error fetching logs: {str(e)}"
+                        })
         
         # If no pod logs found, try to get workflow-level messages
         if not all_logs:
@@ -274,14 +316,17 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                     container_dict = template_dict_copy["container"].copy()
                     # Preserve volumeMounts before creating Container object
                     volume_mounts = container_dict.get("volumeMounts", [])
+                    # Preserve env variables (including ARGO_WORKFLOW_NAME) - remove from dict to avoid type validation
+                    env_vars = container_dict.pop("env", [])
                     # Replace the Python code with the provided code
                     if "args" in container_dict and container_dict["args"]:
                         container_dict["args"] = [request.pythonCode]
                     else:
                         container_dict["args"] = [request.pythonCode]
                     template_dict_copy["container"] = Container(**container_dict)
-                    # Store volumeMounts to add back after serialization
+                    # Store volumeMounts and env to add back after serialization
                     template_dict_copy["_volume_mounts"] = volume_mounts
+                    template_dict_copy["_env"] = env_vars
                 templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
             spec_dict["templates"] = templates
         
@@ -307,19 +352,23 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                 workflow_dict["spec"] = {}
             workflow_dict["spec"]["volumes"] = volumes
         
-        # Ensure volumeMounts are preserved in the container
-        # The Container object might not serialize volumeMounts, so we add them back
+        # Ensure volumeMounts and env are preserved in the container
+        # The Container object might not serialize volumeMounts/env, so we add them back
         if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
             for i, template in enumerate(workflow_dict["spec"]["templates"]):
                 if "container" in template:
-                    # Check if we stored volumeMounts separately
+                    # Check if we stored volumeMounts and env separately
                     original_template = manifest_dict.get("spec", {}).get("templates", [])
                     if original_template and i < len(original_template):
                         original_container = original_template[i].get("container", {})
                         original_volume_mounts = original_container.get("volumeMounts", [])
+                        original_env = original_container.get("env", [])
                         if original_volume_mounts:
                             # Always add volumeMounts back (they might be missing after serialization)
                             template["container"]["volumeMounts"] = original_volume_mounts
+                        if original_env:
+                            # Always add env back (they might be missing after serialization)
+                            template["container"]["env"] = original_env
         
         # Create workflow using Kubernetes CustomObjectsApi
         # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
@@ -507,21 +556,32 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 last_logs_hash = logs_hash
                 last_sent_logs = all_logs
                 
-                await websocket.send_json({
-                    "type": "logs",
-                    "data": all_logs,
-                    "workflow_phase": phase
-                })
+                try:
+                    await websocket.send_json({
+                        "type": "logs",
+                        "data": all_logs,
+                        "workflow_phase": phase
+                    })
+                except (WebSocketDisconnect, RuntimeError) as ws_error:
+                    # Connection closed, stop trying to send
+                    raise ws_error
             
             return phase, all_logs
+        except (WebSocketDisconnect, RuntimeError) as ws_error:
+            # Connection closed, re-raise to break the loop
+            raise ws_error
         except Exception as e:
             print(f"Error in fetch_and_send_logs: {e}")
             import traceback
             traceback.print_exc()
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e)
-            })
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": str(e)
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                # Connection closed, can't send error message
+                raise
             return "Unknown", []
     
     try:
@@ -540,26 +600,35 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                     if final_logs:
                         save_logs_to_database(task_id, final_logs, db)
                         # Send final logs update
-                        await websocket.send_json({
-                            "type": "logs",
-                            "data": final_logs,
-                            "workflow_phase": phase
-                        })
+                        try:
+                            await websocket.send_json({
+                                "type": "logs",
+                                "data": final_logs,
+                                "workflow_phase": phase
+                            })
+                        except (WebSocketDisconnect, RuntimeError):
+                            # Connection closed, break out
+                            break
                 except:
                     pass
                 
-                await websocket.send_json({
-                    "type": "complete",
-                    "workflow_phase": phase
-                })
-                # Keep connection open for a bit, then close
-                await asyncio.sleep(2)
+                try:
+                    await websocket.send_json({
+                        "type": "complete",
+                        "workflow_phase": phase
+                    })
+                    # Keep connection open for a bit, then close
+                    await asyncio.sleep(2)
+                except (WebSocketDisconnect, RuntimeError):
+                    # Connection already closed
+                    pass
                 break
             
             # Wait before next check
             await asyncio.sleep(2)
                 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        # Connection closed by client, this is normal
         pass
     except Exception as e:
         try:
@@ -567,6 +636,9 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 "type": "error",
                 "message": f"Connection error: {str(e)}"
             })
+        except (WebSocketDisconnect, RuntimeError):
+            # Connection already closed, can't send error
+            pass
         except:
             pass
     finally:
