@@ -19,10 +19,8 @@ components:
   # Backend API Service
   - name: backend
     kind: Application
-    dockerCompose:
-      build:
-        context: .
-        dockerfile: ./apps/backend/Dockerfile
+    context: .
+    dockerfile: ./apps/backend/Dockerfile
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
       ARGO_NAMESPACE: argo
@@ -34,12 +32,10 @@ components:
   # Frontend Application
   - name: frontend
     kind: Application
-    dockerCompose:
-      build:
-        context: .
-        dockerfile: ./apps/frontend/Dockerfile
-        args:
-          VITE_API_URL: http://backend:8000
+    context: .
+    dockerfile: ./apps/frontend/Dockerfile
+    buildArgs:
+      VITE_API_URL: http://backend:8000
     environment:
       VITE_API_URL: http://backend:8000
 
