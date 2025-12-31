@@ -25,6 +25,19 @@ See [DEVELOPER.md](./DEVELOPER.md) for detailed development setup and workflow.
 
 See [DEVOPS.md](./DEVOPS.md) for deployment and infrastructure management.
 
+### Bunnyshell Deployment
+
+This repository is configured for deployment on [Bunnyshell](https://bunnyshell.com). The `bunnyshell.yaml` file defines the environment configuration.
+
+**For detailed step-by-step deployment instructions, see [BUNNYSHELL_DEPLOYMENT.md](./BUNNYSHELL_DEPLOYMENT.md).**
+
+**Quick Overview:**
+- Connect your Kubernetes cluster to Bunnyshell
+- Connect your Git repository to Bunnyshell
+- Create a new environment from the `bunnyshell.yaml` configuration
+- Configure RBAC for Argo Workflows access
+- Update `CORS_ORIGINS` for production use
+
 ### For End Users
 
 See [USER.md](./USER.md) for how to use the application.
@@ -61,5 +74,5 @@ make cluster-down
 
 ## License
 
-[Add your license here]
+MIT
 
