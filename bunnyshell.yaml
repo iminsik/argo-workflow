@@ -1,0 +1,83 @@
+# Bunnyshell Environment Configuration
+# This file defines the components and services for deploying the Argo Workflow Manager
+# For more information, see: https://documentation.bunnyshell.com/
+
+name: argo-workflow-manager
+kind: Environment
+
+components:
+  # PostgreSQL Database
+  - name: postgres
+    type: postgresql
+    image: postgres:15-alpine
+    environmentVariables:
+      - name: POSTGRES_PASSWORD
+        value: password
+      - name: POSTGRES_DB
+        value: postgres
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 250m
+      limits:
+        memory: 512Mi
+        cpu: 500m
+    ports:
+      - port: 5432
+        protocol: TCP
+
+  # Backend API Service
+  - name: backend
+    type: application
+    build:
+      context: .
+      dockerfile: ./apps/backend/Dockerfile
+    environmentVariables:
+      - name: DATABASE_URL
+        value: postgresql://postgres:password@postgres:5432/postgres
+      - name: ARGO_NAMESPACE
+        value: argo
+      - name: WORKFLOW_MANIFEST_PATH
+        value: /infrastructure/argo/python-processor.yaml
+      - name: CORS_ORIGINS
+        value: "*"  # Configure based on your frontend URL in production
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
+    ports:
+      - port: 8000
+        protocol: TCP
+    dependsOn:
+      - postgres
+    # Infrastructure is copied into the image during build
+    # Volume mount is optional for runtime updates
+
+  # Frontend Application
+  - name: frontend
+    type: application
+    build:
+      context: .
+      dockerfile: ./apps/frontend/Dockerfile
+      args:
+        - name: VITE_API_URL
+          value: http://backend:8000
+    environmentVariables:
+      - name: VITE_API_URL
+        value: http://backend:8000
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 100m
+      limits:
+        memory: 256Mi
+        cpu: 200m
+    ports:
+      - port: 80
+        protocol: TCP
+    dependsOn:
+      - backend
+

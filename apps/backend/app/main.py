@@ -28,9 +28,10 @@ async def startup_event():
         print(f"Warning: Could not initialize database: {e}. Logs will not be persisted.")
 
 # Configure CORS
+cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],  # Frontend origins
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
