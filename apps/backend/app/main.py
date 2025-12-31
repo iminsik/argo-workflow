@@ -9,6 +9,10 @@ from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgopr
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_template import IoArgoprojWorkflowV1alpha1Template
 from argo_workflows.model.container import Container
+try:
+    from argo_workflows.model.volume_mount import VolumeMount
+except ImportError:
+    VolumeMount = None
 
 app = FastAPI()
 
@@ -43,6 +47,34 @@ class TaskSubmitRequest(BaseModel):
 @app.post("/api/v1/tasks/submit")
 async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
     try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Check if PVC exists and is bound before creating workflow
+        core_api = CoreV1Api()
+        try:
+            pvc = core_api.read_namespaced_persistent_volume_claim(
+                name="task-results-pvc",
+                namespace=namespace
+            )
+            pvc_status = pvc.status.phase if pvc.status else "Unknown"
+            if pvc_status != "Bound":
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"PVC 'task-results-pvc' is not bound. Current status: {pvc_status}. Please ensure the PV is available."
+                )
+        except Exception as pvc_error:
+            # If PVC doesn't exist, that's also a problem
+            if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
+                raise HTTPException(
+                    status_code=400,
+                    detail="PVC 'task-results-pvc' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pv.yaml"
+                )
+            # Re-raise if it's our HTTPException
+            if isinstance(pvc_error, HTTPException):
+                raise pvc_error
+            # Otherwise log and continue (might be a transient issue)
+            print(f"Warning: Could not verify PVC status: {pvc_error}")
+        
         # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
         api_instance = CustomObjectsApi()
         workflow_path = os.getenv("WORKFLOW_MANIFEST_PATH", "/infrastructure/argo/python-processor.yaml")
@@ -71,12 +103,16 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                 # Convert container dict to Container object if present
                 if "container" in template_dict_copy and template_dict_copy["container"]:
                     container_dict = template_dict_copy["container"].copy()
+                    # Preserve volumeMounts before creating Container object
+                    volume_mounts = container_dict.get("volumeMounts", [])
                     # Replace the Python code with the provided code
                     if "args" in container_dict and container_dict["args"]:
                         container_dict["args"] = [request.pythonCode]
                     else:
                         container_dict["args"] = [request.pythonCode]
                     template_dict_copy["container"] = Container(**container_dict)
+                    # Store volumeMounts to add back after serialization
+                    template_dict_copy["_volume_mounts"] = volume_mounts
                 templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
             spec_dict["templates"] = templates
         
@@ -101,6 +137,20 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
             if "spec" not in workflow_dict:
                 workflow_dict["spec"] = {}
             workflow_dict["spec"]["volumes"] = volumes
+        
+        # Ensure volumeMounts are preserved in the container
+        # The Container object might not serialize volumeMounts, so we add them back
+        if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
+            for i, template in enumerate(workflow_dict["spec"]["templates"]):
+                if "container" in template:
+                    # Check if we stored volumeMounts separately
+                    original_template = manifest_dict.get("spec", {}).get("templates", [])
+                    if original_template and i < len(original_template):
+                        original_container = original_template[i].get("container", {})
+                        original_volume_mounts = original_container.get("volumeMounts", [])
+                        if original_volume_mounts:
+                            # Always add volumeMounts back (they might be missing after serialization)
+                            template["container"]["volumeMounts"] = original_volume_mounts
         
         # Create workflow using Kubernetes CustomObjectsApi
         # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
@@ -169,6 +219,10 @@ async def list_tasks():
                     if command and len(command) > 1:
                         python_code = " ".join(command)
             
+            # Get workflow message/conditions for debugging
+            message = status.get("message", "")
+            conditions = status.get("conditions", [])
+            
             workflows.append({
                 "id": metadata.get("name", "unknown"),
                 "generateName": metadata.get("generateName", ""),
@@ -177,6 +231,7 @@ async def list_tasks():
                 "finishedAt": finished_at,
                 "createdAt": metadata.get("creationTimestamp", ""),
                 "pythonCode": python_code,
+                "message": message,  # Add message for debugging
             })
         
         return {"tasks": workflows}
@@ -228,6 +283,7 @@ async def get_task_logs(task_id: str):
                         logs = core_api.read_namespaced_pod_log(
                             name=pod_name,
                             namespace=namespace,
+                            container="main",  # Specify container name for Argo workflows
                             tail_lines=1000
                         )
                     except:
@@ -245,6 +301,7 @@ async def get_task_logs(task_id: str):
                             logs = core_api.read_namespaced_pod_log(
                                 name=actual_pod_name,
                                 namespace=namespace,
+                                container="main",  # Specify container name for Argo workflows
                                 tail_lines=1000
                             )
                             pod_name = actual_pod_name
@@ -328,6 +385,7 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                                 logs = core_api.read_namespaced_pod_log(
                                     name=pod_name,
                                     namespace=namespace,
+                                    container="main",  # Specify container name for Argo workflows
                                     tail_lines=1000
                                 )
                             except:
@@ -342,6 +400,7 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                                     logs = core_api.read_namespaced_pod_log(
                                         name=actual_pod_name,
                                         namespace=namespace,
+                                        container="main",  # Specify container name for Argo workflows
                                         tail_lines=1000
                                     )
                                     pod_name = actual_pod_name

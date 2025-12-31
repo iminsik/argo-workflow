@@ -10,6 +10,7 @@ interface Task {
   finishedAt: string;
   createdAt: string;
   pythonCode: string;
+  message?: string;
 }
 
 interface LogEntry {
@@ -230,17 +231,32 @@ const TaskDialog = React.memo(({
             ×
           </button>
         </div>
-        <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'space-between' }}>
-          <span style={{
-            padding: '4px 8px',
-            borderRadius: '4px',
-            background: getPhaseColor(task.phase),
-            color: 'white',
-            fontSize: '12px',
-            fontWeight: 'bold'
-          }}>
-            {task.phase || 'Unknown'}
-          </span>
+        <div style={{ marginBottom: '1rem', display: 'flex', gap: '10px', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap' }}>
+            <span style={{
+              padding: '4px 8px',
+              borderRadius: '4px',
+              background: getPhaseColor(task.phase),
+              color: 'white',
+              fontSize: '12px',
+              fontWeight: 'bold'
+            }}>
+              {task.phase || 'Unknown'}
+            </span>
+            {task.message && (
+              <span style={{
+                padding: '4px 8px',
+                borderRadius: '4px',
+                background: '#fef3c7',
+                color: '#92400e',
+                fontSize: '12px',
+                fontStyle: 'italic',
+                maxWidth: '400px'
+              }}>
+                {task.message}
+              </span>
+            )}
+          </div>
           {canCancel && (
             <button
               onClick={() => onCancel(task.id)}
