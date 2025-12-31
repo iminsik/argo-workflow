@@ -1,5 +1,5 @@
 import yaml, os, asyncio, json
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kubernetes import config
@@ -9,12 +9,23 @@ from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgopr
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_template import IoArgoprojWorkflowV1alpha1Template
 from argo_workflows.model.container import Container
+from sqlalchemy.orm import Session
+from app.database import init_db, get_db, TaskLog, SessionLocal
 try:
     from argo_workflows.model.volume_mount import VolumeMount
 except ImportError:
     VolumeMount = None
 
 app = FastAPI()
+
+# Initialize database on startup
+@app.on_event("startup")
+async def startup_event():
+    try:
+        init_db()
+        print("Database initialized successfully")
+    except Exception as e:
+        print(f"Warning: Could not initialize database: {e}. Logs will not be persisted.")
 
 # Configure CORS
 app.add_middleware(
@@ -43,6 +54,164 @@ except:
 
 class TaskSubmitRequest(BaseModel):
     pythonCode: str = "print('Processing task in Kind...')"
+
+
+def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
+    """
+    Fetch logs directly from Kubernetes pods.
+    Returns a list of log entries with structure: {node, pod, phase, logs}
+    """
+    if namespace is None:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+    
+    core_api = CoreV1Api()
+    custom_api = CustomObjectsApi()
+    
+    try:
+        # Get workflow to find pod names
+        workflow = custom_api.get_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workflows",
+            name=task_id
+        )
+        
+        status = workflow.get("status", {})
+        nodes = status.get("nodes", {})
+        
+        # Collect logs from all nodes (pods) in the workflow
+        all_logs = []
+        
+        for node_id, node_info in nodes.items():
+            node_type = node_info.get("type", "")
+            phase = node_info.get("phase", "")
+            
+            # Only get logs from Pod nodes
+            if node_type == "Pod":
+                # Try different ways to get the pod name
+                pod_name = (
+                    node_info.get("displayName") or 
+                    node_info.get("id") or 
+                    node_id
+                )
+                
+                try:
+                    # First try with the displayName/id directly
+                    try:
+                        logs = core_api.read_namespaced_pod_log(
+                            name=pod_name,
+                            namespace=namespace,
+                            container="main",
+                            tail_lines=1000
+                        )
+                    except:
+                        # If that fails, try to find the pod by label selector
+                        label_selector = f"workflows.argoproj.io/workflow={task_id}"
+                        pods = core_api.list_namespaced_pod(
+                            namespace=namespace,
+                            label_selector=label_selector
+                        )
+                        
+                        if pods.items:
+                            actual_pod_name = pods.items[0].metadata.name
+                            logs = core_api.read_namespaced_pod_log(
+                                name=actual_pod_name,
+                                namespace=namespace,
+                                container="main",
+                                tail_lines=1000
+                            )
+                            pod_name = actual_pod_name
+                        else:
+                            raise Exception("No pods found for workflow")
+                    
+                    all_logs.append({
+                        "node": node_id,
+                        "pod": pod_name,
+                        "phase": phase,
+                        "logs": logs
+                    })
+                except Exception as e:
+                    all_logs.append({
+                        "node": node_id,
+                        "pod": pod_name,
+                        "phase": phase,
+                        "logs": f"Error fetching logs: {str(e)}"
+                    })
+        
+        # If no pod logs found, try to get workflow-level messages
+        if not all_logs:
+            message = status.get("message", "")
+            if message:
+                all_logs.append({
+                    "node": "workflow",
+                    "pod": "N/A",
+                    "phase": status.get("phase", "Unknown"),
+                    "logs": f"Workflow message: {message}"
+                })
+        
+        return all_logs
+    except Exception as e:
+        raise Exception(f"Error fetching logs from Kubernetes: {str(e)}")
+
+
+def save_logs_to_database(task_id: str, logs: list, db: Session):
+    """
+    Save logs to database. Updates existing entries or creates new ones.
+    """
+    try:
+        for log_entry in logs:
+            # Check if log entry already exists for this task/node/pod combination
+            existing = db.query(TaskLog).filter(
+                TaskLog.task_id == task_id,
+                TaskLog.node_id == log_entry["node"],
+                TaskLog.pod_name == log_entry["pod"]
+            ).first()
+            
+            if existing:
+                # Update existing entry
+                existing.logs = log_entry["logs"]
+                existing.phase = log_entry["phase"]
+            else:
+                # Create new entry
+                db_log = TaskLog(
+                    task_id=task_id,
+                    node_id=log_entry["node"],
+                    pod_name=log_entry["pod"],
+                    phase=log_entry["phase"],
+                    logs=log_entry["logs"]
+                )
+                db.add(db_log)
+        
+        db.commit()
+    except Exception as e:
+        db.rollback()
+        print(f"Error saving logs to database: {e}")
+        raise
+
+
+def get_logs_from_database(task_id: str, db: Session) -> list:
+    """
+    Fetch logs from database for a given task.
+    Returns a list of log entries with structure: {node, pod, phase, logs}
+    """
+    try:
+        db_logs = db.query(TaskLog).filter(
+            TaskLog.task_id == task_id
+        ).order_by(TaskLog.created_at).all()
+        
+        return [
+            {
+                "node": log.node_id,
+                "pod": log.pod_name,
+                "phase": log.phase,
+                "logs": log.logs
+            }
+            for log in db_logs
+        ]
+    except Exception as e:
+        print(f"Error fetching logs from database: {e}")
+        return []
 
 @app.post("/api/v1/tasks/submit")
 async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
@@ -241,100 +410,33 @@ async def list_tasks():
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/tasks/{task_id}/logs")
-async def get_task_logs(task_id: str):
+async def get_task_logs(task_id: str, db: Session = Depends(get_db)):
+    """
+    Get logs for a task. First tries to fetch from database, 
+    then falls back to Kubernetes if not found, and saves to database.
+    """
     try:
-        namespace = os.getenv("ARGO_NAMESPACE", "argo")
-        core_api = CoreV1Api()
+        # First, try to get logs from database
+        db_logs = get_logs_from_database(task_id, db)
         
-        # Get workflow to find pod names
-        custom_api = CustomObjectsApi()
-        workflow = custom_api.get_namespaced_custom_object(
-            group="argoproj.io",
-            version="v1alpha1",
-            namespace=namespace,
-            plural="workflows",
-            name=task_id
-        )
+        if db_logs:
+            # Logs found in database, return them
+            return {"logs": db_logs, "source": "database"}
         
-        status = workflow.get("status", {})
-        nodes = status.get("nodes", {})
-        
-        # Collect logs from all nodes (pods) in the workflow
-        all_logs = []
-        
-        for node_id, node_info in nodes.items():
-            node_type = node_info.get("type", "")
-            phase = node_info.get("phase", "")
+        # If not in database, fetch from Kubernetes and save to database
+        try:
+            k8s_logs = fetch_logs_from_kubernetes(task_id)
+            if k8s_logs:
+                # Save to database for future requests
+                save_logs_to_database(task_id, k8s_logs, db)
+                return {"logs": k8s_logs, "source": "kubernetes"}
+            else:
+                return {"logs": [], "source": "kubernetes"}
+        except Exception as k8s_error:
+            # If Kubernetes fetch fails, return empty logs
+            print(f"Could not fetch logs from Kubernetes: {k8s_error}")
+            return {"logs": [], "source": "error", "error": str(k8s_error)}
             
-            # Only get logs from Pod nodes
-            if node_type == "Pod":
-                # Try different ways to get the pod name
-                pod_name = (
-                    node_info.get("displayName") or 
-                    node_info.get("id") or 
-                    node_id
-                )
-                
-                # Argo workflows often prefix pod names with workflow name
-                # The actual pod name might be in the node ID or we need to list pods
-                try:
-                    # First try with the displayName/id directly
-                    try:
-                        logs = core_api.read_namespaced_pod_log(
-                            name=pod_name,
-                            namespace=namespace,
-                            container="main",  # Specify container name for Argo workflows
-                            tail_lines=1000
-                        )
-                    except:
-                        # If that fails, try to find the pod by label selector
-                        # Argo workflows label pods with workflow name
-                        label_selector = f"workflows.argoproj.io/workflow={task_id}"
-                        pods = core_api.list_namespaced_pod(
-                            namespace=namespace,
-                            label_selector=label_selector
-                        )
-                        
-                        if pods.items:
-                            # Get logs from the first matching pod
-                            actual_pod_name = pods.items[0].metadata.name
-                            logs = core_api.read_namespaced_pod_log(
-                                name=actual_pod_name,
-                                namespace=namespace,
-                                container="main",  # Specify container name for Argo workflows
-                                tail_lines=1000
-                            )
-                            pod_name = actual_pod_name
-                        else:
-                            raise Exception("No pods found for workflow")
-                    
-                    all_logs.append({
-                        "node": node_id,
-                        "pod": pod_name,
-                        "phase": phase,
-                        "logs": logs
-                    })
-                except Exception as e:
-                    # Pod might not exist yet or logs not available
-                    all_logs.append({
-                        "node": node_id,
-                        "pod": pod_name,
-                        "phase": phase,
-                        "logs": f"Error fetching logs: {str(e)}\n\nNode info: {node_info}"
-                    })
-        
-        # If no pod logs found, try to get workflow-level messages
-        if not all_logs:
-            message = status.get("message", "")
-            if message:
-                all_logs.append({
-                    "node": "workflow",
-                    "pod": "N/A",
-                    "phase": status.get("phase", "Unknown"),
-                    "logs": f"Workflow message: {message}"
-                })
-        
-        return {"logs": all_logs}
     except Exception as e:
         import traceback
         traceback.print_exc()
@@ -342,10 +444,17 @@ async def get_task_logs(task_id: str):
 
 @app.websocket("/ws/tasks/{task_id}/logs")
 async def websocket_logs(websocket: WebSocket, task_id: str):
+    """
+    WebSocket endpoint for streaming logs. Fetches from database first,
+    then from Kubernetes, and saves new logs to database.
+    """
     await websocket.accept()
     namespace = os.getenv("ARGO_NAMESPACE", "argo")
     core_api = CoreV1Api()
     custom_api = CustomObjectsApi()
+    
+    # Get database session
+    db = SessionLocal()
     
     last_logs_hash = ""
     last_sent_logs = []
@@ -363,63 +472,31 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 )
                 
                 status = workflow.get("status", {})
-                nodes = status.get("nodes", {})
                 phase = status.get("phase", "Unknown")
                 
-                # Collect logs from all nodes
-                all_logs = []
+                # Try to get logs from database first
+                db_logs = get_logs_from_database(task_id, db)
                 
-                for node_id, node_info in nodes.items():
-                    node_type = node_info.get("type", "")
-                    node_phase = node_info.get("phase", "")
+                # Also fetch latest from Kubernetes to get any new logs
+                try:
+                    k8s_logs = fetch_logs_from_kubernetes(task_id, namespace)
                     
-                    if node_type == "Pod":
-                        pod_name = (
-                            node_info.get("displayName") or 
-                            node_info.get("id") or 
-                            node_id
-                        )
-                        
-                        try:
-                            try:
-                                logs = core_api.read_namespaced_pod_log(
-                                    name=pod_name,
-                                    namespace=namespace,
-                                    container="main",  # Specify container name for Argo workflows
-                                    tail_lines=1000
-                                )
-                            except:
-                                label_selector = f"workflows.argoproj.io/workflow={task_id}"
-                                pods = core_api.list_namespaced_pod(
-                                    namespace=namespace,
-                                    label_selector=label_selector
-                                )
-                                
-                                if pods.items:
-                                    actual_pod_name = pods.items[0].metadata.name
-                                    logs = core_api.read_namespaced_pod_log(
-                                        name=actual_pod_name,
-                                        namespace=namespace,
-                                        container="main",  # Specify container name for Argo workflows
-                                        tail_lines=1000
-                                    )
-                                    pod_name = actual_pod_name
-                                else:
-                                    raise Exception("No pods found for workflow")
-                            
-                            all_logs.append({
-                                "node": node_id,
-                                "pod": pod_name,
-                                "phase": node_phase,
-                                "logs": logs
-                            })
-                        except Exception as e:
-                            all_logs.append({
-                                "node": node_id,
-                                "pod": pod_name,
-                                "phase": node_phase,
-                                "logs": f"Error fetching logs: {str(e)}"
-                            })
+                    # Save/update logs in database
+                    if k8s_logs:
+                        save_logs_to_database(task_id, k8s_logs, db)
+                        # Use Kubernetes logs (they're more up-to-date)
+                        all_logs = k8s_logs
+                    elif db_logs:
+                        # Use database logs if Kubernetes fetch failed
+                        all_logs = db_logs
+                    else:
+                        all_logs = []
+                except Exception as k8s_error:
+                    # If Kubernetes fetch fails, use database logs
+                    if db_logs:
+                        all_logs = db_logs
+                    else:
+                        all_logs = []
                 
                 # Create hash to check if logs changed
                 logs_hash = json.dumps(all_logs, sort_keys=True)
@@ -437,6 +514,14 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 
                 # Check if workflow is finished
                 if phase in ["Succeeded", "Failed", "Error"]:
+                    # Final save to ensure all logs are persisted
+                    try:
+                        final_logs = fetch_logs_from_kubernetes(task_id, namespace)
+                        if final_logs:
+                            save_logs_to_database(task_id, final_logs, db)
+                    except:
+                        pass
+                    
                     await websocket.send_json({
                         "type": "complete",
                         "workflow_phase": phase
@@ -465,6 +550,8 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
             })
         except:
             pass
+    finally:
+        db.close()
 
 @app.delete("/api/v1/tasks/{task_id}")
 async def cancel_task(task_id: str):
