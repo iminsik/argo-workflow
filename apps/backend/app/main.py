@@ -507,21 +507,32 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 last_logs_hash = logs_hash
                 last_sent_logs = all_logs
                 
-                await websocket.send_json({
-                    "type": "logs",
-                    "data": all_logs,
-                    "workflow_phase": phase
-                })
+                try:
+                    await websocket.send_json({
+                        "type": "logs",
+                        "data": all_logs,
+                        "workflow_phase": phase
+                    })
+                except (WebSocketDisconnect, RuntimeError) as ws_error:
+                    # Connection closed, stop trying to send
+                    raise ws_error
             
             return phase, all_logs
+        except (WebSocketDisconnect, RuntimeError) as ws_error:
+            # Connection closed, re-raise to break the loop
+            raise ws_error
         except Exception as e:
             print(f"Error in fetch_and_send_logs: {e}")
             import traceback
             traceback.print_exc()
-            await websocket.send_json({
-                "type": "error",
-                "message": str(e)
-            })
+            try:
+                await websocket.send_json({
+                    "type": "error",
+                    "message": str(e)
+                })
+            except (WebSocketDisconnect, RuntimeError):
+                # Connection closed, can't send error message
+                raise
             return "Unknown", []
     
     try:
@@ -540,26 +551,35 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                     if final_logs:
                         save_logs_to_database(task_id, final_logs, db)
                         # Send final logs update
-                        await websocket.send_json({
-                            "type": "logs",
-                            "data": final_logs,
-                            "workflow_phase": phase
-                        })
+                        try:
+                            await websocket.send_json({
+                                "type": "logs",
+                                "data": final_logs,
+                                "workflow_phase": phase
+                            })
+                        except (WebSocketDisconnect, RuntimeError):
+                            # Connection closed, break out
+                            break
                 except:
                     pass
                 
-                await websocket.send_json({
-                    "type": "complete",
-                    "workflow_phase": phase
-                })
-                # Keep connection open for a bit, then close
-                await asyncio.sleep(2)
+                try:
+                    await websocket.send_json({
+                        "type": "complete",
+                        "workflow_phase": phase
+                    })
+                    # Keep connection open for a bit, then close
+                    await asyncio.sleep(2)
+                except (WebSocketDisconnect, RuntimeError):
+                    # Connection already closed
+                    pass
                 break
             
             # Wait before next check
             await asyncio.sleep(2)
                 
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError):
+        # Connection closed by client, this is normal
         pass
     except Exception as e:
         try:
@@ -567,6 +587,9 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                 "type": "error",
                 "message": f"Connection error: {str(e)}"
             })
+        except (WebSocketDisconnect, RuntimeError):
+            # Connection already closed, can't send error
+            pass
         except:
             pass
     finally:

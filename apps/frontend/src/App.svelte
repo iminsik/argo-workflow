@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onMount, onDestroy, untrack } from 'svelte';
   import { Play, RefreshCw, X, XCircle, Trash2 } from 'lucide-svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import TaskRow from './TaskRow.svelte';
@@ -32,6 +32,10 @@
   let initialLoading = $state(true);
   let selectedTaskId = $state<string | null>(null);
   let activeTab = $state<'code' | 'logs'>('code');
+  
+  // Track previous values to detect actual changes
+  let prevSelectedTaskId: string | null = null;
+  let prevActiveTab: 'code' | 'logs' = 'code';
   let taskLogs = $state<LogEntry[]>([]);
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
@@ -51,6 +55,16 @@
   let reconnectAttempts = 0;
   const maxReconnectAttempts = 5;
   let lastLogsHash = '';
+  let taskRefreshInterval: ReturnType<typeof setInterval> | null = null;
+  const TASK_REFRESH_INTERVAL_MS = 5000; // 5 seconds
+  let currentWebSocketTaskId: string | null = null;
+  
+  // Track the last connected task/tab to prevent unnecessary reconnections
+  let lastConnectedTaskId: string | null = null;
+  let lastConnectedTab: 'code' | 'logs' | null = null;
+  
+  // Manual subscription pattern - only update when values actually change
+  // This avoids the reactive effect system causing unnecessary re-runs
 
   // Convert reactive statement to $derived
   let selectedTask = $derived(selectedTaskId ? tasks.find(t => t.id === selectedTaskId) || null : null);
@@ -111,12 +125,41 @@
     return logs.map(l => `${l.node}:${l.pod}:${l.phase}:${l.logs.length}:${l.logs.slice(-100)}`).join('|');
   }
 
-  function logsChanged(oldLogs: LogEntry[], newLogs: LogEntry[]): boolean {
-    if (oldLogs.length !== newLogs.length) return true;
-    return oldLogs.some((oldLog, i) => {
-      const newLog = newLogs[i];
-      return !newLog || oldLog.logs !== newLog.logs || oldLog.phase !== newLog.phase;
-    });
+  function getTotalLogsLength(logs: LogEntry[]): number {
+    return logs.reduce((total, log) => total + log.logs.length, 0);
+  }
+
+  function hasMoreLogs(oldLogs: LogEntry[], newLogs: LogEntry[]): boolean {
+    // Always update if old logs are empty (initial load)
+    if (oldLogs.length === 0 && newLogs.length > 0) return true;
+    
+    // If new logs have more entries, they have more content
+    if (newLogs.length > oldLogs.length) return true;
+    
+    // If same number of entries, check if any log entry has more content
+    if (newLogs.length === oldLogs.length) {
+      for (let i = 0; i < newLogs.length; i++) {
+        const oldLog = oldLogs[i];
+        const newLog = newLogs[i];
+        
+        // If entry doesn't exist in old logs, it's new content
+        if (!oldLog) return true;
+        
+        // If logs content is longer, it has more content
+        if (newLog.logs.length > oldLog.logs.length) return true;
+        
+        // If logs content changed and is longer or equal but different (new content appended)
+        if (newLog.logs !== oldLog.logs && newLog.logs.length >= oldLog.logs.length) {
+          // Check if new logs contain old logs (content was appended)
+          if (newLog.logs.startsWith(oldLog.logs)) return true;
+        }
+      }
+    }
+    
+    // Check total length as fallback
+    const oldTotal = getTotalLogsLength(oldLogs);
+    const newTotal = getTotalLogsLength(newLogs);
+    return newTotal > oldTotal;
   }
 
   function disconnectWebSocket() {
@@ -129,11 +172,33 @@
       reconnectTimeout = null;
     }
     reconnectAttempts = 0;
+    currentWebSocketTaskId = null;
   }
 
   function connectWebSocket(taskId: string) {
+    // Check if task is already completed - don't connect WebSocket for completed tasks
+    const task = tasks.find(t => t.id === taskId);
+    if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+      console.log('Task is completed, skipping WebSocket connection:', taskId, task.phase);
+      return;
+    }
+    
+    // Don't reconnect if already connected to the same task
+    if (ws && ws.readyState === WebSocket.OPEN && currentWebSocketTaskId === taskId) {
+      console.log('WebSocket already connected to task:', taskId);
+      return;
+    }
+    
+    // Additional check: if we're already in the process of connecting to this task, don't connect again
+    if (currentWebSocketTaskId === taskId && ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN)) {
+      console.log('WebSocket connection already in progress or open for task:', taskId);
+      return;
+    }
+    
+    console.log('Connecting WebSocket to task:', taskId);
     lastLogsHash = '';
     disconnectWebSocket();
+    currentWebSocketTaskId = taskId;
 
     const wsUrl = apiUrl.replace(/^http/, 'ws') + `/ws/tasks/${taskId}/logs`;
     
@@ -153,16 +218,29 @@
         try {
           const message = JSON.parse(event.data);
           
+          // Check if task is completed - stop processing messages for completed tasks
+          const task = tasks.find(t => t.id === taskId);
+          if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+            console.log('Task completed, closing WebSocket:', taskId, task.phase);
+            disconnectWebSocket();
+            loadingLogs = false;
+            return;
+          }
+          
           if (message.type === 'logs') {
             const newLogs = message.data || [];
             const newHash = logsHash(newLogs);
             
-            if (newHash !== lastLogsHash && logsChanged(taskLogs, newLogs)) {
+            // Only update if logs have more content than currently displayed
+            if (newHash !== lastLogsHash && hasMoreLogs(taskLogs, newLogs)) {
               lastLogsHash = newHash;
               taskLogs = newLogs;
             }
             loadingLogs = false;
           } else if (message.type === 'complete') {
+            // Task completed - disconnect WebSocket
+            console.log('Task completed via WebSocket, disconnecting:', taskId);
+            disconnectWebSocket();
             loadingLogs = false;
           } else if (message.type === 'error') {
             console.error('WebSocket error:', message.message);
@@ -224,13 +302,21 @@
   }
 
   async function fetchLogsViaRest(taskId: string) {
+    // Check if task is already completed - don't fetch logs for completed tasks
+    const task = tasks.find(t => t.id === taskId);
+    if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+      console.log('Task is completed, skipping log fetch:', taskId, task.phase);
+      return;
+    }
+    
     try {
       loadingLogs = true;
       const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/logs`);
       if (res.ok) {
         const data = await res.json();
         const logs = data.logs || [];
-        if (logs.length > 0) {
+        // Only update if new logs have more content than currently displayed
+        if (logs.length > 0 && hasMoreLogs(taskLogs, logs)) {
           taskLogs = logs;
         }
       }
@@ -241,28 +327,61 @@
     }
   }
 
-  // Convert reactive statement to $effect
-  $effect(() => {
-    if (selectedTask && activeTab === 'logs') {
-      lastLogsHash = '';
-      fetchLogsViaRest(selectedTask.id);
-      connectWebSocket(selectedTask.id);
-      
-      return () => {
-        disconnectWebSocket();
-        if (activeTab !== 'logs') {
-          taskLogs = [];
+  // Manual WebSocket management - separate from reactive system
+  // This function only reconnects if the taskId or tab actually changed
+  function manageWebSocketConnection(taskId: string | null, tab: 'code' | 'logs') {
+    // Check if task is already completed - don't connect for completed tasks
+    if (taskId) {
+      const task = tasks.find(t => t.id === taskId);
+      if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+        console.log('Task is completed, skipping WebSocket management:', taskId, task.phase);
+        // Disconnect if connected
+        if (lastConnectedTaskId === taskId) {
+          disconnectWebSocket();
+          lastConnectedTaskId = null;
+          lastConnectedTab = null;
         }
-        lastLogsHash = '';
-      };
-    } else {
+        return;
+      }
+    }
+    
+    // Check if values actually changed compared to what we last connected to
+    const taskIdChanged = taskId !== lastConnectedTaskId;
+    const tabChanged = tab !== lastConnectedTab;
+    
+    // Early return if values haven't changed - prevents unnecessary reconnections
+    if (!taskIdChanged && !tabChanged) {
+      return;
+    }
+    
+    // Disconnect any existing connection first
+    if (lastConnectedTaskId !== null) {
       disconnectWebSocket();
-      if (activeTab !== 'logs') {
+    }
+    
+    const shouldConnect = taskId && tab === 'logs';
+    
+    if (shouldConnect) {
+      // Connect to the new task
+      lastLogsHash = '';
+      fetchLogsViaRest(taskId);
+      connectWebSocket(taskId);
+      lastConnectedTaskId = taskId;
+      lastConnectedTab = tab;
+    } else {
+      // Not on logs tab or no task selected
+      lastConnectedTaskId = null;
+      lastConnectedTab = null;
+      if (tab !== 'logs') {
         taskLogs = [];
       }
       lastLogsHash = '';
     }
-  });
+  }
+  
+  // Remove reactive effect - we'll manage WebSocket connections manually
+  // This prevents the reactive system from causing unnecessary reconnections
+  // WebSocket management is now triggered explicitly when selectedTaskId or activeTab change
 
   async function runTask() {
     try {
@@ -427,10 +546,19 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
 
   onMount(() => {
     fetchTasks(true);
+    
+    // Set up periodic task status updates
+    taskRefreshInterval = setInterval(() => {
+      fetchTasks(false);
+    }, TASK_REFRESH_INTERVAL_MS);
   });
 
   onDestroy(() => {
     disconnectWebSocket();
+    if (taskRefreshInterval) {
+      clearInterval(taskRefreshInterval);
+      taskRefreshInterval = null;
+    }
   });
 </script>
 
@@ -478,7 +606,16 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
               <TaskRow 
                 {task}
                 {getPhaseColor}
-                onTaskClick={(t) => selectedTaskId = t.id}
+                onTaskClick={(t) => {
+                  const newTaskId = t.id;
+                  if (selectedTaskId !== newTaskId) {
+                    selectedTaskId = newTaskId;
+                    // Update previous values
+                    prevSelectedTaskId = newTaskId;
+                    // Manually trigger WebSocket management
+                    manageWebSocketConnection(newTaskId, activeTab);
+                  }
+                }}
                 onCancel={cancelTask}
                 onDelete={deleteTask}
               />
@@ -493,13 +630,25 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     <TaskDialog
       task={selectedTask}
       {activeTab}
-      setActiveTab={(tab) => activeTab = tab}
+      setActiveTab={(tab) => {
+        if (activeTab !== tab) {
+          activeTab = tab;
+          // Update previous values
+          prevActiveTab = tab;
+          // Manually trigger WebSocket management
+          manageWebSocketConnection(selectedTaskId, tab);
+        }
+      }}
       {taskLogs}
       {loadingLogs}
       onClose={() => {
         selectedTaskId = null;
         activeTab = 'code';
         taskLogs = [];
+        // Manually disconnect
+        disconnectWebSocket();
+        lastConnectedTaskId = null;
+        lastConnectedTab = null;
       }}
       onCancel={cancelTask}
       onDelete={deleteTask}
