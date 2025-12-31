@@ -35,8 +35,16 @@
   let taskLogs = $state<LogEntry[]>([]);
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
-  let pythonCode = $state("print('Processing task in Kind...')");
+  const defaultPythonCode = "print('Processing task in Kind...')";
+  let pythonCode = $state(defaultPythonCode);
   let submitting = $state(false);
+
+  // Reset pythonCode when dialog closes
+  $effect(() => {
+    if (!showSubmitModal) {
+      pythonCode = defaultPythonCode;
+    }
+  });
 
   let ws: WebSocket | null = null;
   let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -275,6 +283,7 @@
       const data = await res.json();
       alert('Started Workflow: ' + data.id);
       showSubmitModal = false;
+      // pythonCode will be reset by the $effect when showSubmitModal becomes false
       fetchTasks();
     } catch (error) {
       console.error('Failed to submit task:', error);
