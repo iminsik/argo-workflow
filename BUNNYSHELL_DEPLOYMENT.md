@@ -13,6 +13,17 @@ Before deploying, ensure you have:
    - Has sufficient resources (see resource requirements below)
 3. **Git Repository**: Your repository connected to Bunnyshell
 4. **Argo Workflows**: Installed in your Kubernetes cluster in the `argo` namespace
+5. **kubectl Access**: Configured to access your Kubernetes cluster for post-deployment setup
+
+### Pre-Deployment Checklist
+
+Before starting the deployment, ensure:
+
+- [ ] Argo Workflows is installed and running in the `argo` namespace
+- [ ] You have `kubectl` access to the cluster
+- [ ] You have permissions to create ServiceAccounts, Roles, and RoleBindings
+- [ ] You have permissions to create PersistentVolumes and PersistentVolumeClaims
+- [ ] Your cluster has sufficient resources (see Resource Requirements below)
 
 ### Resource Requirements
 
@@ -68,8 +79,9 @@ The `bunnyshell.yaml` file defines three components:
 
 **API URL Configuration:**
 - The frontend's `VITE_API_URL` is set to `http://backend:8000` (internal service name)
-- This works within the Bunnyshell environment
-- If you need external access, configure ingress/routing in Bunnyshell
+- This is used as a build-time argument during Docker build
+- For internal access within Bunnyshell, this works automatically
+- If you need external access, configure ingress/routing in Bunnyshell and update the build arg
 
 **Database Connection:**
 - The backend connects to PostgreSQL using the service name `postgres`
@@ -99,24 +111,84 @@ Before deploying, you may want to customize environment variables:
    - Deploy all components to your Kubernetes cluster
    - Set up networking between components
 
-### Step 7: Configure Kubernetes RBAC
+### Step 7: Create Required Kubernetes Resources
 
-After deployment, you need to configure RBAC for the backend to access Argo Workflows:
+Before the backend can function properly, you need to create:
 
-1. Access your Kubernetes cluster (via `kubectl` or Bunnyshell's cluster access)
-2. Apply the RBAC configuration:
+1. **PersistentVolume and PersistentVolumeClaim** (required for task results storage):
+   ```bash
+   kubectl apply -f infrastructure/k8s/pv.yaml
+   ```
+   This creates:
+   - PersistentVolume: `task-results-pv`
+   - PersistentVolumeClaim: `task-results-pvc` in `argo` namespace
+
+2. **RBAC Configuration** (required for backend to access Argo Workflows):
    ```bash
    kubectl apply -f infrastructure/k8s/rbac.yaml
    ```
+   This creates:
+   - ServiceAccount: `backend-sa` in `argo` namespace
+   - Role: `argo-manager` with workflow permissions
+   - RoleBinding: Links service account to role
 
-This creates:
-- ServiceAccount: `backend-sa` in `argo` namespace
-- Role: `argo-manager` with workflow permissions
-- RoleBinding: Links service account to role
+**Important**: The backend component needs to use the `backend-sa` ServiceAccount. Since Bunnyshell deploys to its own namespace but the ServiceAccount is in the `argo` namespace, you have two options:
 
-**Note**: The backend component needs to use this ServiceAccount. You may need to update the Bunnyshell component configuration or manually patch the deployment.
+**Option A (Recommended)**: Create the ServiceAccount in the Bunnyshell namespace and bind it to the Role in `argo` namespace:
+```bash
+# Get the namespace where Bunnyshell deployed your components
+# Replace 'argo-workflow-manager' with your actual environment name if different
+BUNNYSHELL_NS=$(kubectl get namespaces | grep argo-workflow-manager | awk '{print $1}')
 
-### Step 8: Verify Deployment
+# If namespace not found, check Bunnyshell dashboard for the actual namespace name
+# Or list all namespaces: kubectl get namespaces
+
+# Create ServiceAccount in Bunnyshell namespace
+kubectl create serviceaccount backend-sa -n $BUNNYSHELL_NS
+
+# The Role and RoleBinding in argo namespace should already exist from Step 7
+# Update the RoleBinding to reference the ServiceAccount in Bunnyshell namespace
+kubectl patch rolebinding backend-sa-binding -n argo --type='json' -p='[{"op": "replace", "path": "/subjects/0/namespace", "value": "'$BUNNYSHELL_NS'"}]'
+```
+
+**Option B**: Use the existing ServiceAccount in `argo` namespace (requires the backend pod to be in the same namespace or use a ClusterRoleBinding - not recommended for security reasons).
+
+### Step 8: Configure Backend ServiceAccount
+
+After deployment, configure the backend to use the ServiceAccount:
+
+1. **Find the Bunnyshell namespace**:
+   ```bash
+   kubectl get namespaces | grep argo-workflow-manager
+   ```
+
+2. **Update the backend deployment** to use the ServiceAccount:
+   ```bash
+   # Replace <namespace> with your Bunnyshell namespace (e.g., argo-workflow-manager-xxx)
+   # Find the namespace first:
+   kubectl get namespaces | grep argo-workflow-manager
+   
+   # Then patch the deployment:
+   kubectl patch deployment backend -n <namespace> -p '{"spec":{"template":{"spec":{"serviceAccountName":"backend-sa"}}}}'
+   ```
+
+3. **Restart the backend pod** to apply the ServiceAccount:
+   ```bash
+   kubectl rollout restart deployment/backend -n <namespace>
+   ```
+
+4. **Verify the ServiceAccount is set**:
+   ```bash
+   kubectl get deployment backend -n <namespace> -o jsonpath='{.spec.template.spec.serviceAccountName}'
+   ```
+   Should output: `backend-sa`
+
+5. **Verify the pod is using the ServiceAccount**:
+   ```bash
+   kubectl get pod -n <namespace> -l app=backend -o jsonpath='{.items[0].spec.serviceAccountName}'
+   ```
+
+### Step 9: Verify Deployment
 
 1. **Check Component Status**:
    - In Bunnyshell dashboard, navigate to your environment
@@ -147,7 +219,7 @@ This creates:
    - Verify the UI loads correctly
    - Test creating a workflow task
 
-### Step 9: Configure Ingress/Routing (Optional)
+### Step 10: Configure Ingress/Routing (Optional)
 
 If you need external access to your services:
 
@@ -161,32 +233,45 @@ If you need external access to your services:
 
 ## Post-Deployment Configuration
 
-### Update Backend ServiceAccount
+### Verify PVC Status
 
-The backend needs to use the `backend-sa` ServiceAccount to access Argo Workflows. You may need to:
+The backend requires the `task-results-pvc` to be bound before it can create workflows:
 
-1. Edit the backend deployment in Bunnyshell
-2. Add ServiceAccount configuration:
-   ```yaml
-   serviceAccountName: backend-sa
-   ```
-3. Or patch the deployment:
-   ```bash
-   kubectl patch deployment backend -n <namespace> -p '{"spec":{"template":{"spec":{"serviceAccountName":"backend-sa"}}}}'
-   ```
+```bash
+# Check PVC status
+kubectl get pvc -n argo task-results-pvc
+
+# If not bound, check PV
+kubectl get pv task-results-pv
+
+# If PVC doesn't exist, create it
+kubectl apply -f infrastructure/k8s/pv.yaml
+```
 
 ### Verify Argo Workflows Access
+
+The backend uses Kubernetes in-cluster configuration (`load_incluster_config()`), which means it automatically uses the ServiceAccount token from the pod it's running in. This is why configuring the ServiceAccount is critical.
 
 Test that the backend can create workflows:
 
 ```bash
-# Check backend logs
+# Check backend logs for any connection errors
 kubectl logs -n <namespace> deployment/backend
 
-# Test workflow creation via API
-curl -X POST http://<backend-url>/api/tasks \
+# Verify the backend can see workflows
+kubectl exec -n <namespace> deployment/backend -- python -c "
+from kubernetes import config
+from kubernetes.client import CustomObjectsApi
+config.load_incluster_config()
+api = CustomObjectsApi()
+workflows = api.list_namespaced_custom_object('argoproj.io', 'v1alpha1', 'argo', 'workflows')
+print(f'Found {len(workflows.get(\"items\", []))} workflows')
+"
+
+# Test workflow creation via API (if you have external access configured)
+curl -X POST http://<backend-url>/api/v1/tasks/submit \
   -H "Content-Type: application/json" \
-  -d '{"name": "test", "code": "print(\"hello\")"}'
+  -d '{"pythonCode": "print(\"hello\")"}'
 ```
 
 ## Troubleshooting
@@ -208,12 +293,27 @@ kubectl logs -n <namespace> <component-pod-name>
 **Symptoms**: Backend errors when creating workflows
 
 **Solutions**:
-1. Verify RBAC is configured: `kubectl get rolebinding -n argo`
-2. Check ServiceAccount is set: `kubectl get deployment backend -o yaml | grep serviceAccount`
-3. Verify backend can access Kubernetes API:
+1. Verify PVC exists: `kubectl get pvc -n argo task-results-pvc`
+2. Verify RBAC is configured: `kubectl get rolebinding -n argo`
+3. Check ServiceAccount is set: `kubectl get deployment backend -n <namespace> -o yaml | grep serviceAccount`
+4. Verify backend can access Kubernetes API:
    ```bash
    kubectl exec -n <namespace> <backend-pod> -- kubectl get workflows -n argo
    ```
+5. Check backend logs for specific error messages:
+   ```bash
+   kubectl logs -n <namespace> deployment/backend
+   ```
+
+### PVC Not Found Error
+
+**Symptoms**: Backend returns error "PVC 'task-results-pvc' not found"
+
+**Solutions**:
+1. Create the PVC: `kubectl apply -f infrastructure/k8s/pv.yaml`
+2. Verify PVC is bound: `kubectl get pvc -n argo task-results-pvc`
+3. If PVC is in Pending state, check if PV exists: `kubectl get pv task-results-pv`
+4. Ensure the storage class matches: `kubectl get pvc -n argo task-results-pvc -o jsonpath='{.spec.storageClassName}'`
 
 ### CORS Errors
 
@@ -316,9 +416,16 @@ To remove the deployment:
 1. In Bunnyshell dashboard, navigate to your environment
 2. Click **Delete Environment** or **Destroy**
 3. Confirm deletion
-4. Optionally, remove RBAC resources:
+4. Optionally, remove Kubernetes resources:
    ```bash
+   # Remove RBAC
    kubectl delete -f infrastructure/k8s/rbac.yaml
+   
+   # Remove PVC (optional - data will be lost)
+   kubectl delete pvc -n argo task-results-pvc
+   
+   # Remove PV (optional)
+   kubectl delete pv task-results-pv
    ```
 
 ## Additional Resources
