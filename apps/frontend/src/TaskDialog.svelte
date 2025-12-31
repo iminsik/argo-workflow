@@ -102,7 +102,7 @@
       onclick={() => setActiveTab('logs')}
       class="px-5 py-2 border-none bg-transparent cursor-pointer border-b-2 transition-colors {activeTab === 'logs' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground'}"
     >
-      Logs {loadingLogs && '...'}
+      Logs{#if loadingLogs} ...{/if}
     </button>
   </div>
 

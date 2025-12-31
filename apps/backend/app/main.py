@@ -97,16 +97,10 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                 )
                 
                 try:
-                    # First try with the displayName/id directly
+                    # First, try to get the actual pod to check its status
+                    actual_pod = None
                     try:
-                        logs = core_api.read_namespaced_pod_log(
-                            name=pod_name,
-                            namespace=namespace,
-                            container="main",
-                            tail_lines=1000
-                        )
-                    except:
-                        # If that fails, try to find the pod by label selector
+                        # Try to find the pod by label selector first
                         label_selector = f"workflows.argoproj.io/workflow={task_id}"
                         pods = core_api.list_namespaced_pod(
                             namespace=namespace,
@@ -114,16 +108,60 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                         )
                         
                         if pods.items:
-                            actual_pod_name = pods.items[0].metadata.name
-                            logs = core_api.read_namespaced_pod_log(
-                                name=actual_pod_name,
+                            actual_pod = pods.items[0]
+                            pod_name = actual_pod.metadata.name
+                    except:
+                        pass
+                    
+                    # Check if pod is ready before trying to fetch logs
+                    if actual_pod:
+                        pod_phase = actual_pod.status.phase if actual_pod.status else None
+                        # If pod is still initializing or pending, skip log fetch (not an error)
+                        if pod_phase in ["Pending"]:
+                            # Pod is still starting - this is normal, don't add error
+                            continue
+                    
+                    # Try to fetch logs
+                    try:
+                        logs = core_api.read_namespaced_pod_log(
+                            name=pod_name,
+                            namespace=namespace,
+                            container="main",
+                            tail_lines=1000
+                        )
+                    except Exception as log_error:
+                        # Check if it's a "PodInitializing" or "waiting to start" error
+                        error_str = str(log_error)
+                        if "PodInitializing" in error_str or "waiting to start" in error_str:
+                            # Pod is still initializing - this is normal, skip silently
+                            continue
+                        # If that fails and we don't have the pod yet, try to find it
+                        if not actual_pod:
+                            label_selector = f"workflows.argoproj.io/workflow={task_id}"
+                            pods = core_api.list_namespaced_pod(
                                 namespace=namespace,
-                                container="main",
-                                tail_lines=1000
+                                label_selector=label_selector
                             )
-                            pod_name = actual_pod_name
+                            
+                            if pods.items:
+                                actual_pod = pods.items[0]
+                                actual_pod_name = actual_pod.metadata.name
+                                # Check pod phase again
+                                pod_phase = actual_pod.status.phase if actual_pod.status else None
+                                if pod_phase in ["Pending"]:
+                                    continue
+                                
+                                logs = core_api.read_namespaced_pod_log(
+                                    name=actual_pod_name,
+                                    namespace=namespace,
+                                    container="main",
+                                    tail_lines=1000
+                                )
+                                pod_name = actual_pod_name
+                            else:
+                                raise Exception("No pods found for workflow")
                         else:
-                            raise Exception("No pods found for workflow")
+                            raise log_error
                     
                     all_logs.append({
                         "node": node_id,
@@ -132,12 +170,15 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
                         "logs": logs
                     })
                 except Exception as e:
-                    all_logs.append({
-                        "node": node_id,
-                        "pod": pod_name,
-                        "phase": phase,
-                        "logs": f"Error fetching logs: {str(e)}"
-                    })
+                    error_str = str(e)
+                    # Only add error message for actual errors, not for pods that are still starting
+                    if "PodInitializing" not in error_str and "waiting to start" not in error_str:
+                        all_logs.append({
+                            "node": node_id,
+                            "pod": pod_name,
+                            "phase": phase,
+                            "logs": f"Error fetching logs: {str(e)}"
+                        })
         
         # If no pod logs found, try to get workflow-level messages
         if not all_logs:

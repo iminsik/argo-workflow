@@ -63,6 +63,9 @@
   let lastConnectedTaskId: string | null = null;
   let lastConnectedTab: 'code' | 'logs' | null = null;
   
+  // Track which completed tasks have already had their final logs fetched
+  let completedTasksWithLogsFetched = $state<Set<string>>(new Set());
+  
   // Manual subscription pattern - only update when values actually change
   // This avoids the reactive effect system causing unnecessary re-runs
 
@@ -180,6 +183,11 @@
     const task = tasks.find(t => t.id === taskId);
     if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
       console.log('Task is completed, skipping WebSocket connection:', taskId, task.phase);
+      // Ensure we've fetched final logs once
+      if (!completedTasksWithLogsFetched.has(taskId)) {
+        completedTasksWithLogsFetched.add(taskId);
+        fetchLogsViaRest(taskId);
+      }
       return;
     }
     
@@ -222,6 +230,10 @@
           const task = tasks.find(t => t.id === taskId);
           if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
             console.log('Task completed, closing WebSocket:', taskId, task.phase);
+            // Mark as fetched before disconnecting
+            if (!completedTasksWithLogsFetched.has(taskId)) {
+              completedTasksWithLogsFetched.add(taskId);
+            }
             disconnectWebSocket();
             loadingLogs = false;
             return;
@@ -238,8 +250,9 @@
             }
             loadingLogs = false;
           } else if (message.type === 'complete') {
-            // Task completed - disconnect WebSocket
+            // Task completed - mark as fetched and disconnect WebSocket
             console.log('Task completed via WebSocket, disconnecting:', taskId);
+            completedTasksWithLogsFetched.add(taskId);
             disconnectWebSocket();
             loadingLogs = false;
           } else if (message.type === 'error') {
@@ -302,11 +315,16 @@
   }
 
   async function fetchLogsViaRest(taskId: string) {
-    // Check if task is already completed - don't fetch logs for completed tasks
+    // Check if task is already completed
     const task = tasks.find(t => t.id === taskId);
     if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
-      console.log('Task is completed, skipping log fetch:', taskId, task.phase);
-      return;
+      // For completed tasks, only skip if we've already fetched AND we have logs displayed
+      // This allows fetching logs when user opens a completed task for the first time
+      if (completedTasksWithLogsFetched.has(taskId) && taskLogs.length > 0) {
+        console.log('Task is completed and logs already fetched, skipping:', taskId, task.phase);
+        return;
+      }
+      console.log('Fetching logs for completed task:', taskId, task.phase);
     }
     
     try {
@@ -315,13 +333,28 @@
       if (res.ok) {
         const data = await res.json();
         const logs = data.logs || [];
-        // Only update if new logs have more content than currently displayed
-        if (logs.length > 0 && hasMoreLogs(taskLogs, logs)) {
-          taskLogs = logs;
+        // For completed tasks, always update if we got logs (even if same content)
+        // For running tasks, only update if logs have more content
+        if (logs.length > 0) {
+          if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+            // For completed tasks, always show the logs and mark as fetched
+            taskLogs = logs;
+            completedTasksWithLogsFetched.add(taskId);
+          } else if (hasMoreLogs(taskLogs, logs)) {
+            // For running tasks, only update if more content
+            taskLogs = logs;
+          }
+        } else if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+          // Even if no logs, mark as fetched to prevent repeated attempts
+          completedTasksWithLogsFetched.add(taskId);
         }
       }
     } catch (error) {
       console.error('Failed to fetch logs via REST:', error);
+      // Mark as fetched even on error to prevent repeated failed attempts for completed tasks
+      if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+        completedTasksWithLogsFetched.add(taskId);
+      }
     } finally {
       loadingLogs = false;
     }
@@ -330,18 +363,35 @@
   // Manual WebSocket management - separate from reactive system
   // This function only reconnects if the taskId or tab actually changed
   function manageWebSocketConnection(taskId: string | null, tab: 'code' | 'logs') {
-    // Check if task is already completed - don't connect for completed tasks
+    // Check if task is already completed
     if (taskId) {
       const task = tasks.find(t => t.id === taskId);
       if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
-        console.log('Task is completed, skipping WebSocket management:', taskId, task.phase);
-        // Disconnect if connected
-        if (lastConnectedTaskId === taskId) {
-          disconnectWebSocket();
-          lastConnectedTaskId = null;
-          lastConnectedTab = null;
+        // For completed tasks, fetch logs once when user opens logs tab
+        if (tab === 'logs') {
+          // Fetch logs if we haven't fetched yet OR if we don't have logs displayed
+          // This ensures logs are shown when user opens a completed task
+          if (!completedTasksWithLogsFetched.has(taskId) || taskLogs.length === 0) {
+            console.log('Task completed, fetching logs:', taskId, task.phase);
+            // Fetch logs (will mark as fetched inside fetchLogsViaRest)
+            fetchLogsViaRest(taskId);
+          }
+          // Don't connect WebSocket for completed tasks
+          if (lastConnectedTaskId === taskId) {
+            disconnectWebSocket();
+            lastConnectedTaskId = null;
+            lastConnectedTab = null;
+          }
+          return;
+        } else {
+          // Not on logs tab - just disconnect if connected
+          if (lastConnectedTaskId === taskId) {
+            disconnectWebSocket();
+            lastConnectedTaskId = null;
+            lastConnectedTab = null;
+          }
+          return;
         }
-        return;
       }
     }
     
@@ -612,6 +662,8 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
                     selectedTaskId = newTaskId;
                     // Update previous values
                     prevSelectedTaskId = newTaskId;
+                    // Clear logs when switching to a different task
+                    taskLogs = [];
                     // Manually trigger WebSocket management
                     manageWebSocketConnection(newTaskId, activeTab);
                   }
