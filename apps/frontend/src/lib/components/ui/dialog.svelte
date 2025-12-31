@@ -10,8 +10,9 @@
   let {
     open = $bindable(false),
     onOpenChange,
+    children = $bindable(),
     ...rest
-  }: DialogProps = $props();
+  }: DialogProps & { children?: import('svelte').Snippet } = $props();
 
   function handleClose() {
     open = false;
@@ -22,16 +23,25 @@
 {#if open}
   <div
     class="fixed inset-0 z-50 flex items-center justify-center"
-    onclick={handleClose}
     role="presentation"
   >
-    <div class="fixed inset-0 bg-black/50" />
+    <button 
+      class="fixed inset-0 bg-black/50 border-none p-0 cursor-pointer"
+      type="button"
+      aria-label="Close dialog"
+      onclick={handleClose}
+    ></button>
     <div
       class={cn(
         'relative z-50 w-full max-w-lg bg-background p-6 shadow-lg rounded-lg',
         rest.class
       )}
-      onclick={(e) => e.stopPropagation()}
+      role="dialog"
+      aria-modal="true"
+      tabindex="-1"
+      onkeydown={(e) => e.key === 'Escape' && handleClose()}
+      onmousedown={(e) => e.stopPropagation()}
+      ontouchstart={(e) => e.stopPropagation()}
     >
       <button
         onclick={handleClose}
@@ -40,7 +50,7 @@
         <X class="h-4 w-4" />
         <span class="sr-only">Close</span>
       </button>
-      <slot />
+      {#if children}{@render children()}{/if}
     </div>
   </div>
 {/if}

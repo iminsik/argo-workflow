@@ -27,7 +27,7 @@
 
   let { task, activeTab, setActiveTab, taskLogs, loadingLogs, onClose, onCancel, onDelete }: Props = $props();
 
-  const canCancel = task.phase === 'Running' || task.phase === 'Pending';
+  const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   let dialogOpen = $state(true);
 
   function getPhaseColor(phase: string): string {

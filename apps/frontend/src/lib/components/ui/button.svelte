@@ -11,8 +11,9 @@
     variant = 'default',
     size = 'default',
     class: className = '',
+    children = $bindable(),
     ...rest
-  }: ButtonProps = $props();
+  }: ButtonProps & { children?: import('svelte').Snippet } = $props();
 
   const variants = {
     default: 'bg-primary text-primary-foreground hover:bg-primary/90',
@@ -40,5 +41,5 @@
   )}
   {...rest}
 >
-  <slot />
+  {#if children}{@render children()}{/if}
 </button>

@@ -9,8 +9,9 @@
   let {
     variant = 'default',
     class: className = '',
+    children = $bindable(),
     ...rest
-  }: BadgeProps = $props();
+  }: BadgeProps & { children?: import('svelte').Snippet } = $props();
 
   const variants = {
     default: 'border-transparent bg-primary text-primary-foreground hover:bg-primary/80',
@@ -28,5 +29,5 @@
   )}
   {...rest}
 >
-  <slot />
+  {#if children}{@render children()}{/if}
 </div>

@@ -19,7 +19,7 @@
 
   let { task, getPhaseColor, onTaskClick, onCancel, onDelete }: Props = $props();
 
-  const canCancel = task.phase === 'Running' || task.phase === 'Pending';
+  const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
 
   function handleCancelClick(e: MouseEvent) {
     e.stopPropagation();
