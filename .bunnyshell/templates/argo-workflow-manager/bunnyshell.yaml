@@ -19,8 +19,8 @@ components:
   # Backend API Service
   - name: backend
     kind: Application
-    gitRepo: "{{repo.url}}"
-    gitBranch: "{{repo.branch}}"
+    gitRepo: "https://github.com/iminsik/argo-workflow.git"
+    gitBranch: "main"
     gitApplicationPath: "."
     dockerCompose:
       build:
@@ -37,8 +37,8 @@ components:
   # Frontend Application
   - name: frontend
     kind: Application
-    gitRepo: "{{repo.url}}"
-    gitBranch: "{{repo.branch}}"
+    gitRepo: "https://github.com/iminsik/argo-workflow.git"
+    gitBranch: "main"
     gitApplicationPath: "."
     dockerCompose:
       build:
