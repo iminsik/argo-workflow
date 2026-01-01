@@ -56,7 +56,7 @@
   const maxReconnectAttempts = 5;
   let lastLogsHash = '';
   let taskRefreshInterval: ReturnType<typeof setInterval> | null = null;
-  const TASK_REFRESH_INTERVAL_MS = 5000; // 5 seconds
+  const TASK_REFRESH_INTERVAL_MS = 2000; // 2 seconds - reduced to catch faster phase transitions
   let currentWebSocketTaskId: string | null = null;
   
   // Track the last connected task/tab to prevent unnecessary reconnections
@@ -248,10 +248,35 @@
               lastLogsHash = newHash;
               taskLogs = newLogs;
             }
+            
+            // Always update task phase if provided in the message (even if logs haven't changed)
+            // This ensures phase transitions are captured immediately
+            if (message.workflow_phase) {
+              const taskIndex = tasks.findIndex(t => t.id === taskId);
+              if (taskIndex !== -1 && tasks[taskIndex].phase !== message.workflow_phase) {
+                // Create a new array to ensure reactivity
+                tasks = tasks.map((t, i) => i === taskIndex ? { ...t, phase: message.workflow_phase } : t);
+                
+                // Trigger a task refresh to ensure list view is updated
+                // This helps catch phase transitions that might be missed
+                fetchTasks(false);
+              }
+            }
+            
             loadingLogs = false;
           } else if (message.type === 'complete') {
             // Task completed - mark as fetched and disconnect WebSocket
             console.log('Task completed via WebSocket, disconnecting:', taskId);
+            
+            // Update task phase if provided in the message
+            if (message.workflow_phase) {
+              const taskIndex = tasks.findIndex(t => t.id === taskId);
+              if (taskIndex !== -1 && tasks[taskIndex].phase !== message.workflow_phase) {
+                // Create a new array to ensure reactivity
+                tasks = tasks.map((t, i) => i === taskIndex ? { ...t, phase: message.workflow_phase } : t);
+              }
+            }
+            
             completedTasksWithLogsFetched.add(taskId);
             disconnectWebSocket();
             loadingLogs = false;
@@ -593,6 +618,18 @@ for result_file in sorted(result_files):
 print("\\n" + "=" * 50)
 print(f"Successfully read {len(result_files)} result file(s)")`;
   }
+
+  // Effect to refresh tasks when selected task phase changes (to ensure UI stays in sync)
+  $effect(() => {
+    if (selectedTaskId && selectedTask) {
+      // When task phase changes to completed, refresh tasks to get final status
+      const task = tasks.find(t => t.id === selectedTaskId);
+      if (task && (task.phase === 'Succeeded' || task.phase === 'Failed')) {
+        // Refresh tasks to ensure we have the latest status
+        fetchTasks(false);
+      }
+    }
+  });
 
   onMount(() => {
     fetchTasks(true);

@@ -81,12 +81,22 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
         status = workflow.get("status", {})
         nodes = status.get("nodes", {})
         
+        # Get the workflow's overall phase to use for log entries
+        workflow_phase = determine_workflow_phase(status)
+        
         # Collect logs from all nodes (pods) in the workflow
         all_logs = []
         
         for node_id, node_info in nodes.items():
             node_type = node_info.get("type", "")
-            phase = node_info.get("phase", "")
+            node_phase = node_info.get("phase", "")
+            
+            # Use workflow phase if workflow is completed, otherwise use node phase
+            # This ensures log entries show the correct phase when workflow transitions
+            if workflow_phase in ["Succeeded", "Failed", "Error"]:
+                phase = workflow_phase
+            else:
+                phase = node_phase or "Pending"
             
             # Only get logs from Pod nodes
             if node_type == "Pod":
@@ -255,6 +265,87 @@ def get_logs_from_database(task_id: str, db: Session) -> list:
         print(f"Error fetching logs from database: {e}")
         return []
 
+
+def determine_workflow_phase(status: dict) -> str:
+    """
+    Determine the actual workflow phase by checking workflow status and node states.
+    This helps distinguish between 'Pending' (workflow created but pods not running) 
+    and 'Running' (pods are actually executing).
+    """
+    if not status:
+        return "Pending"
+    
+    phase = status.get("phase")
+    if not phase:
+        return "Pending"
+    
+    # If workflow is finished, return the final phase
+    if phase in ["Succeeded", "Failed", "Error"]:
+        return phase
+    
+    nodes = status.get("nodes", {})
+    
+    # If workflow phase is "Running", check node states to determine actual status
+    if phase == "Running":
+        if not nodes:
+            # No nodes yet means workflow is still pending
+            return "Pending"
+        
+        # Check pod node states
+        has_running_pod = False
+        has_pending_pod = False
+        has_succeeded_pod = False
+        has_failed_pod = False
+        
+        for node_id, node_info in nodes.items():
+            node_type = node_info.get("type", "")
+            node_phase = node_info.get("phase", "")
+            
+            # Only check Pod nodes (skip workflow-level nodes)
+            if node_type == "Pod":
+                if node_phase == "Running":
+                    has_running_pod = True
+                elif node_phase == "Succeeded":
+                    has_succeeded_pod = True
+                elif node_phase == "Failed" or node_phase == "Error":
+                    has_failed_pod = True
+                elif node_phase in ["Pending", ""]:
+                    has_pending_pod = True
+        
+        # If we have running pods, it's actually running
+        if has_running_pod:
+            return "Running"
+        # If pods have succeeded but workflow hasn't updated yet, still show as running
+        # (workflow phase will update to Succeeded shortly)
+        elif has_succeeded_pod and not has_running_pod and not has_pending_pod:
+            # Pods completed but workflow phase hasn't updated yet - show as running
+            # This is a transitional state
+            return "Running"
+        # If we only have pending pods or no pod nodes, it's pending
+        elif has_pending_pod or not any(n.get("type") == "Pod" for n in nodes.values()):
+            return "Pending"
+        # Otherwise, trust the workflow phase
+        else:
+            return phase
+    
+    # For other phases (like "Pending"), check if nodes exist and are running
+    # This handles cases where workflow phase might lag behind node states
+    if nodes:
+        has_running_pod = False
+        for node_id, node_info in nodes.items():
+            node_type = node_info.get("type", "")
+            node_phase = node_info.get("phase", "")
+            if node_type == "Pod" and node_phase == "Running":
+                has_running_pod = True
+                break
+        
+        # If we have running pods but workflow phase says pending, it's actually running
+        if has_running_pod and phase == "Pending":
+            return "Running"
+    
+    # Return the workflow phase as-is for other cases
+    return phase
+
 @app.post("/api/v1/tasks/submit")
 async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
     try:
@@ -411,10 +502,8 @@ async def list_tasks():
             status = item.get("status", {})
             spec = item.get("spec", {})
             
-            # Determine phase - check multiple possible locations
-            phase = status.get("phase") or "Pending"
-            if not status:  # No status means workflow hasn't been processed yet
-                phase = "Pending"
+            # Determine phase using improved logic that checks node states
+            phase = determine_workflow_phase(status)
             
             # Get timestamps from status
             started_at = status.get("startedAt") or status.get("startTime") or ""
@@ -463,13 +552,46 @@ async def get_task_logs(task_id: str, db: Session = Depends(get_db)):
     """
     Get logs for a task. First tries to fetch from database, 
     then falls back to Kubernetes if not found, and saves to database.
+    Also updates phase in database if workflow has completed.
     """
     try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        custom_api = CustomObjectsApi()
+        
+        # Get current workflow phase to ensure log phases are up-to-date
+        try:
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=task_id
+            )
+            status = workflow.get("status", {})
+            current_workflow_phase = determine_workflow_phase(status)
+        except Exception as e:
+            print(f"Could not fetch workflow status: {e}")
+            current_workflow_phase = None
+        
         # First, try to get logs from database
         db_logs = get_logs_from_database(task_id, db)
         
+        # If we have logs in database, check if phase needs updating
+        if db_logs and current_workflow_phase:
+            # Update phase if workflow has completed and log phase is stale
+            needs_update = False
+            for log_entry in db_logs:
+                if current_workflow_phase in ["Succeeded", "Failed", "Error"]:
+                    if log_entry["phase"] != current_workflow_phase:
+                        log_entry["phase"] = current_workflow_phase
+                        needs_update = True
+            
+            # If phase was updated, save back to database
+            if needs_update:
+                save_logs_to_database(task_id, db_logs, db)
+        
         if db_logs:
-            # Logs found in database, return them
+            # Logs found in database, return them (with updated phase if needed)
             return {"logs": db_logs, "source": "database"}
         
         # If not in database, fetch from Kubernetes and save to database
@@ -507,10 +629,11 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
     
     last_logs_hash = ""
     last_sent_logs = []
+    last_sent_phase = None
     
     # Helper function to fetch and send logs
     async def fetch_and_send_logs():
-        nonlocal last_logs_hash, last_sent_logs
+        nonlocal last_logs_hash, last_sent_logs, last_sent_phase
         try:
             # Get workflow status
             workflow = custom_api.get_namespaced_custom_object(
@@ -522,7 +645,7 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
             )
             
             status = workflow.get("status", {})
-            phase = status.get("phase", "Unknown")
+            phase = determine_workflow_phase(status)
             
             # Try to get logs from database first
             db_logs = get_logs_from_database(task_id, db)
@@ -551,10 +674,17 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
             # Create hash to check if logs changed
             logs_hash = json.dumps(all_logs, sort_keys=True)
             
-            # Send logs if they changed (or if this is the first time)
-            if logs_hash != last_logs_hash:
-                last_logs_hash = logs_hash
-                last_sent_logs = all_logs
+            # Send updates if logs changed OR phase changed (for immediate phase updates)
+            logs_changed = logs_hash != last_logs_hash
+            phase_changed = phase != last_sent_phase
+            
+            if logs_changed or phase_changed:
+                if logs_changed:
+                    last_logs_hash = logs_hash
+                    last_sent_logs = all_logs
+                
+                if phase_changed:
+                    last_sent_phase = phase
                 
                 try:
                     await websocket.send_json({
@@ -624,8 +754,8 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
                     pass
                 break
             
-            # Wait before next check
-            await asyncio.sleep(2)
+            # Wait before next check - reduced to 1 second for faster phase detection
+            await asyncio.sleep(1)
                 
     except (WebSocketDisconnect, RuntimeError):
         # Connection closed by client, this is normal
