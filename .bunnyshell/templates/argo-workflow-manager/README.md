@@ -20,17 +20,26 @@ Before deploying this template, ensure:
 
 After deploying this template, you need to:
 
-1. **Create PersistentVolume and PersistentVolumeClaim**:
+1. **Configure Resource Limits** (Required for Bunnyshell Managed Clusters):
+   - Navigate to each component in the Bunnyshell UI
+   - Go to the Configuration section
+   - Add resource limits:
+     - **PostgreSQL**: Requests: 256Mi memory, 250m CPU | Limits: 512Mi memory, 500m CPU
+     - **Backend**: Requests: 512Mi memory, 500m CPU | Limits: 1Gi memory, 1000m CPU
+     - **Frontend**: Requests: 128Mi memory, 100m CPU | Limits: 256Mi memory, 200m CPU
+   - **Note**: Resource limits may be stripped from templates during import, so they need to be set manually
+
+2. **Create PersistentVolume and PersistentVolumeClaim**:
    ```bash
    kubectl apply -f infrastructure/k8s/pv.yaml
    ```
 
-2. **Configure RBAC**:
+3. **Configure RBAC**:
    ```bash
    kubectl apply -f infrastructure/k8s/rbac.yaml
    ```
 
-3. **Update Backend ServiceAccount** (if backend is in a different namespace):
+4. **Update Backend ServiceAccount** (if backend is in a different namespace):
    - Find the Bunnyshell namespace: `kubectl get namespaces | grep argo-workflow-manager`
    - Create ServiceAccount in that namespace and update RoleBinding
 

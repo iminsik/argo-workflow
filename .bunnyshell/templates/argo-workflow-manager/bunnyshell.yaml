@@ -15,14 +15,13 @@ components:
       environment:
         POSTGRES_PASSWORD: password
         POSTGRES_DB: postgres
-    pod:
-      resources:
-        requests:
-          memory: 256Mi
-          cpu: 250m
-        limits:
-          memory: 512Mi
-          cpu: 500m
+    resources:
+      requests:
+        memory: 256Mi
+        cpu: 250m
+      limits:
+        memory: 512Mi
+        cpu: 500m
 
   # Backend API Service
   - name: backend
@@ -39,15 +38,15 @@ components:
       ARGO_NAMESPACE: argo
       WORKFLOW_MANIFEST_PATH: /infrastructure/argo/python-processor.yaml
       CORS_ORIGINS: "*"  # Configure based on your frontend URL in production
+    resources:
+      requests:
+        memory: 512Mi
+        cpu: 500m
+      limits:
+        memory: 1Gi
+        cpu: 1000m
     pod:
       serviceAccountName: backend-sa
-      resources:
-        requests:
-          memory: 512Mi
-          cpu: 500m
-        limits:
-          memory: 1Gi
-          cpu: 1000m
 
   # Frontend Application
   - name: frontend
@@ -63,12 +62,11 @@ components:
           VITE_API_URL: http://backend:8000
     environment:
       VITE_API_URL: http://backend:8000
-    pod:
-      resources:
-        requests:
-          memory: 128Mi
-          cpu: 100m
-        limits:
-          memory: 256Mi
-          cpu: 200m
+    resources:
+      requests:
+        memory: 128Mi
+        cpu: 100m
+      limits:
+        memory: 256Mi
+        cpu: 200m
 
