@@ -1,6 +1,13 @@
 # Bunnyshell Environment Configuration
 # This file defines the components and services for deploying the Argo Workflow Manager
 # For more information, see: https://documentation.bunnyshell.com/
+#
+# Prerequisites:
+# - Argo Workflows must be installed in your Kubernetes cluster in the 'argo' namespace
+# - PersistentVolume and PersistentVolumeClaim (task-results-pvc) must be created
+# - RBAC must be configured (ServiceAccount: backend-sa with workflow permissions)
+#
+# See README.md for detailed setup instructions
 
 kind: Environment
 name: argo-workflow-manager
@@ -35,8 +42,17 @@ components:
         dockerfile: ./apps/backend/Dockerfile
     environment:
       DATABASE_URL: postgresql://postgres:password@postgres:5432/postgres
+      # Argo Workflows Configuration
       ARGO_NAMESPACE: argo
       WORKFLOW_MANIFEST_PATH: /infrastructure/argo/python-processor.yaml
+      ARGO_PVC_NAME: task-results-pvc  # PersistentVolumeClaim name for workflow results
+      # Optional: Argo Workflows Server URL (if you want to access Argo UI)
+      # ARGO_SERVER_URL: http://argo-server.argo.svc.cluster.local:2746
+      # Optional: Workflow configuration
+      # WORKFLOW_TIMEOUT: 3600  # Workflow timeout in seconds (default: no timeout)
+      # WORKFLOW_RETRY_STRATEGY: "Always"  # Retry strategy: Always, OnFailure, OnError, OnTransientError
+      # WORKFLOW_MAX_RETRIES: 3  # Maximum number of retries
+      # CORS Configuration
       CORS_ORIGINS: "*"  # Configure based on your frontend URL in production
     resources:
       requests:
