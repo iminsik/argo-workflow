@@ -1,6 +1,18 @@
 # Bunnyshell Environment Configuration
 # This file defines the components and services for deploying the Argo Workflow Manager
 # For more information, see: https://documentation.bunnyshell.com/
+#
+# Prerequisites:
+# - Argo Workflows must be installed in your Kubernetes cluster in the 'argo' namespace
+# - PersistentVolume and PersistentVolumeClaim (task-results-pvc) must be created
+# - RBAC must be configured (ServiceAccount: backend-sa with workflow permissions)
+#
+# Post-Deployment Steps:
+# 1. Create ServiceAccount in Bunnyshell namespace (see DEPLOYMENT_STRATEGY.md Phase 5)
+# 2. Update RoleBinding to reference ServiceAccount in Bunnyshell namespace
+# 3. Verify backend can access Argo Workflows
+#
+# See DEPLOYMENT_STRATEGY.md for detailed step-by-step instructions
 
 name: argo-workflow-manager
 kind: Environment
@@ -12,7 +24,7 @@ components:
     image: postgres:15-alpine
     environmentVariables:
       - name: POSTGRES_PASSWORD
-        value: password
+        value: password  # TODO: Use Bunnyshell secrets for production
       - name: POSTGRES_DB
         value: postgres
     resources:
@@ -35,12 +47,16 @@ components:
     environmentVariables:
       - name: DATABASE_URL
         value: postgresql://postgres:password@postgres:5432/postgres
+      # Argo Workflows Configuration
       - name: ARGO_NAMESPACE
         value: argo
       - name: WORKFLOW_MANIFEST_PATH
         value: /infrastructure/argo/python-processor.yaml
+      - name: ARGO_PVC_NAME
+        value: task-results-pvc  # PersistentVolumeClaim name for workflow results
+      # CORS Configuration
       - name: CORS_ORIGINS
-        value: "*"  # Configure based on your frontend URL in production
+        value: "*"  # TODO: Configure based on your frontend URL in production
     resources:
       requests:
         memory: 512Mi
@@ -53,8 +69,12 @@ components:
         protocol: TCP
     dependsOn:
       - postgres
-    # Infrastructure is copied into the image during build
-    # Volume mount is optional for runtime updates
+    # ServiceAccount Configuration
+    # Note: ServiceAccount 'backend-sa' must be created in the Bunnyshell namespace
+    # and bound to the Role in 'argo' namespace. See DEPLOYMENT_STRATEGY.md Phase 5.
+    # If your Bunnyshell version supports pod.serviceAccountName, uncomment below:
+    # pod:
+    #   serviceAccountName: backend-sa
 
   # Frontend Application
   - name: frontend
@@ -64,10 +84,12 @@ components:
       dockerfile: ./apps/frontend/Dockerfile
       args:
         - name: VITE_API_URL
-          value: http://backend:8000
+          value: http://backend:8000  # For internal access
+          # TODO: If using external ingress, update to: https://api-{{env.BUNNYSHELL_SPACE_DOMAIN}}
     environmentVariables:
       - name: VITE_API_URL
-        value: http://backend:8000
+        value: http://backend:8000  # For internal access
+        # TODO: If using external ingress, update to: https://api-{{env.BUNNYSHELL_SPACE_DOMAIN}}
     resources:
       requests:
         memory: 128Mi
@@ -80,4 +102,10 @@ components:
         protocol: TCP
     dependsOn:
       - backend
+    # Optional: Configure ingress/routing for external access
+    # Uncomment and configure if you need external access:
+    # hosts:
+    #   - hostname: web-{{env.BUNNYSHELL_SPACE_DOMAIN}}
+    #     path: /
+    #     port: 80
 

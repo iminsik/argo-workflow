@@ -29,7 +29,10 @@ See [DEVOPS.md](./DEVOPS.md) for deployment and infrastructure management.
 
 This repository is configured for deployment on [Bunnyshell](https://bunnyshell.com). The `bunnyshell.yaml` file defines the environment configuration.
 
-**For detailed step-by-step deployment instructions, see [BUNNYSHELL_DEPLOYMENT.md](./BUNNYSHELL_DEPLOYMENT.md).**
+**Deployment Options:**
+- **CLI Deployment**: See [BUNNYSHELL_CLI_DEPLOYMENT.md](./BUNNYSHELL_CLI_DEPLOYMENT.md) for command-line deployment
+- **UI Deployment**: See [BUNNYSHELL_DEPLOYMENT.md](./BUNNYSHELL_DEPLOYMENT.md) for web UI deployment
+- **Quick Start**: See [DEPLOYMENT_SUMMARY.md](./DEPLOYMENT_SUMMARY.md) for a quick overview
 
 **Quick Overview:**
 - Connect your Kubernetes cluster to Bunnyshell
@@ -43,11 +46,24 @@ This repository is configured for deployment on [Bunnyshell](https://bunnyshell.
 - A Kubernetes cluster connected to Bunnyshell
 - Git repository connected to Bunnyshell
 
-**Deployment Steps:**
-1. Connect your repository to Bunnyshell
-2. Ensure your Kubernetes cluster is connected
-3. Deploy the environment using the `bunnyshell.yaml` configuration
-4. Configure environment variables as needed (especially `CORS_ORIGINS` for production)
+**Quick CLI Deployment:**
+```bash
+# 1. Set up Kubernetes resources
+./scripts/setup-k8s-resources.sh
+
+# 2. Deploy via CLI
+bns environments create \
+  --name argo-workflow-manager \
+  --cluster-id <cluster-id> \
+  --repository-id <repository-id> \
+  --branch main \
+  --config-file bunnyshell.yaml
+
+bns environments deploy --id <environment-id>
+
+# 3. Configure ServiceAccount
+./scripts/configure-serviceaccount.sh
+```
 
 **Note:** Make sure to update the `CORS_ORIGINS` environment variable in the backend component to match your frontend URL in production.
 
