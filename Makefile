@@ -1,4 +1,4 @@
-.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs
+.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs argo-setup-external
 
 cluster-up:
 	kind create cluster --name argo-dev --config infrastructure/k8s/kind-config.yaml
@@ -16,7 +16,11 @@ dev-up:
 dev-down:
 	docker-compose down -v
 
-argo-list: ## List all running workflows in Kind
+argo-setup-external: ## Set up Argo Workflows in external Kubernetes cluster
+	@echo "Setting up Argo Workflows in external cluster..."
+	@./scripts/setup-k8s-resources.sh
+
+argo-list: ## List all running workflows
 	argo list
 
 argo-logs: ## View logs of latest workflow (usage: make argo-logs name=my-wf)

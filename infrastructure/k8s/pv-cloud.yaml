@@ -1,0 +1,26 @@
+# Alternative PersistentVolumeClaim configuration for cloud clusters
+# This uses dynamic storage provisioning instead of manual hostPath volumes
+# Use this for GKE, EKS, AKS, or other cloud-managed Kubernetes clusters
+#
+# Usage:
+#   kubectl apply -f infrastructure/k8s/pv-cloud.yaml
+#
+# Note: This only creates a PVC. The cloud provider will automatically
+# provision a PersistentVolume using the default StorageClass.
+
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: task-results-pvc
+  namespace: argo
+spec:
+  # Use default StorageClass or specify your cluster's StorageClass
+  # For most cloud providers, you can use the default StorageClass
+  # For ReadWriteMany access, you may need a specific StorageClass (e.g., NFS, AzureFile)
+  storageClassName: ""  # Empty string uses default StorageClass
+  accessModes:
+    - ReadWriteMany  # Required for workflows that need shared storage
+  resources:
+    requests:
+      storage: 10Gi
+
