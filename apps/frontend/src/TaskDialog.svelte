@@ -3,6 +3,7 @@
   import Button from '$lib/components/ui/button.svelte';
   import Badge from '$lib/components/ui/badge.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
+  import MonacoEditor from './MonacoEditor.svelte';
 
   interface Props {
     task: {
@@ -109,8 +110,22 @@
   <!-- Tab Content -->
   <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
     {#if activeTab === 'code'}
-      <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm whitespace-pre-wrap">
-        {task.pythonCode || 'No Python code available'}
+      <div class="flex-1 min-h-0 overflow-hidden">
+        {#if task.pythonCode}
+          <div class="h-full w-full">
+            <MonacoEditor 
+              value={task.pythonCode} 
+              language="python" 
+              theme="vs-dark" 
+              height="100%"
+              readonly={true}
+            />
+          </div>
+        {:else}
+          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+            No Python code available
+          </div>
+        {/if}
       </div>
     {:else}
       <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm whitespace-pre-wrap">

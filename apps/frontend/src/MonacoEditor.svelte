@@ -8,9 +8,10 @@
     language?: string;
     theme?: string;
     height?: string;
+    readonly?: boolean;
   }
 
-  let { value = $bindable(''), language = 'python', theme = 'vs-dark', height = '400px' }: Props = $props();
+  let { value = $bindable(''), language = 'python', theme = 'vs-dark', height = '400px', readonly = false }: Props = $props();
 
   let container: HTMLDivElement;
   let editorInstance: editor.IStandaloneCodeEditor | null = null;
@@ -50,15 +51,24 @@
       lineNumbers: 'on',
       scrollBeyondLastLine: false,
       automaticLayout: true,
+      readOnly: readonly,
     });
 
     editorInstance.onDidChangeModelContent(() => {
       // Only update the prop if the change came from user input, not from external update
-      if (!isUpdatingFromExternal && editorInstance) {
+      // Skip updates if editor is readonly
+      if (!isUpdatingFromExternal && !readonly && editorInstance) {
         const newValue = editorInstance.getValue();
         if (newValue !== value) {
           value = newValue;
         }
+      }
+    });
+    
+    // Update readonly state when prop changes
+    $effect(() => {
+      if (editorInstance) {
+        editorInstance.updateOptions({ readOnly: readonly });
       }
     });
 
@@ -81,12 +91,16 @@
   });
 </script>
 
-<div bind:this={container} style="width: 100%; height: {height};"></div>
+<div bind:this={container} class="monaco-container" style="width: 100%; height: {height};"></div>
 
 <style>
-  div {
+  .monaco-container {
     border: 1px solid #e5e7eb;
     border-radius: 4px;
     overflow: hidden;
+  }
+  
+  :global(.monaco-container) {
+    min-height: 200px;
   }
 </style>
