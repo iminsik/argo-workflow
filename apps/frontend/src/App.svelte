@@ -242,9 +242,18 @@
           if (message.type === 'logs') {
             const newLogs = message.data || [];
             const newHash = logsHash(newLogs);
+            const logsChanged = newHash !== lastLogsHash && hasMoreLogs(taskLogs, newLogs);
             
-            // Only update if logs have more content than currently displayed
-            if (newHash !== lastLogsHash && hasMoreLogs(taskLogs, newLogs)) {
+            // Check if phases in log entries have changed (even if log content hasn't)
+            const phasesChanged = newLogs.length > 0 && taskLogs.length > 0 && 
+              newLogs.some((newLog, i) => {
+                const oldLog = taskLogs[i];
+                return oldLog && newLog.phase !== oldLog.phase;
+              });
+            
+            // Update logs if they have more content OR if phases have changed
+            // This ensures log entry phases stay in sync with workflow phase
+            if (logsChanged || phasesChanged) {
               lastLogsHash = newHash;
               taskLogs = newLogs;
             }
