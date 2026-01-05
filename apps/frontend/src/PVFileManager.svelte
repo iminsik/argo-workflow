@@ -12,6 +12,9 @@
   let selectedFileContent = $state<string | null>(null);
   let selectedFileName = $state<string | null>(null);
   let fileManagerApi: any = null;
+  let operationInProgress = $state(false);
+  let operationMessage = $state<string | null>(null);
+  let operationProgress = $state(0); // 0-100
 
   async function fetchFiles(path: string = '/mnt/results') {
     try {
@@ -128,6 +131,22 @@
       No files or directories found in this location.
     </div>
   {:else if !error}
+    <!-- Operation Progress Indicator -->
+    {#if operationInProgress}
+      <div class="mb-4 p-4 bg-primary/10 border border-primary rounded">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-sm font-medium">{operationMessage || 'Processing...'}</span>
+          <span class="text-sm text-muted-foreground">{operationProgress}%</span>
+        </div>
+        <div class="w-full bg-muted rounded-full h-2">
+          <div 
+            class="bg-primary h-2 rounded-full transition-all duration-300"
+            style="width: {operationProgress}%"
+          ></div>
+        </div>
+      </div>
+    {/if}
+    
     <!-- Debug info (remove after fixing) -->
     <div class="mb-2 text-xs text-muted-foreground">
       Debug: {fileData.length} items loaded
@@ -148,12 +167,21 @@
               console.log('SVAR copy-files intercepted:', ids, 'to', target);
               
               try {
+                operationInProgress = true;
+                operationMessage = `Copying ${ids.length} file(s)...`;
+                operationProgress = 0;
+                
                 const actualDestinations: string[] = [];
+                const totalFiles = ids.length;
                 
                 // Calculate actual destination paths and perform copy for each file
-                for (const fileId of ids) {
+                for (let i = 0; i < ids.length; i++) {
+                  const fileId = ids[i];
                   const sourcePath = fileId;
                   const fileName = sourcePath.split('/').pop() || 'file';
+                  
+                  operationMessage = `Copying ${fileName}... (${i + 1}/${totalFiles})`;
+                  operationProgress = Math.round((i / totalFiles) * 50); // First half for preparation
                   
                   // Determine destination path
                   let destinationPath: string;
@@ -188,6 +216,9 @@
                     }
                   }
                   
+                  operationMessage = `Copying ${fileName}... (${i + 1}/${totalFiles})`;
+                  operationProgress = Math.round(50 + (i / totalFiles) * 40); // 50-90% for copying
+                  
                   // Copy the file
                   const copyResponse = await fetch(`${apiUrl}/api/v1/pv/copy?source_path=${encodeURIComponent(sourcePath)}&destination_path=${encodeURIComponent(finalDestination)}`, {
                     method: 'POST'
@@ -196,6 +227,8 @@
                   if (!copyResponse.ok) {
                     const errorData = await copyResponse.json();
                     console.error('Error copying file:', errorData);
+                    operationInProgress = false;
+                    operationMessage = null;
                     alert(`Failed to copy ${fileName}: ${errorData.detail || 'Unknown error'}`);
                     return false; // Prevent the operation in SVAR
                   }
@@ -203,10 +236,15 @@
                   actualDestinations.push(finalDestination);
                 }
                 
+                operationMessage = 'Finalizing...';
+                operationProgress = 95;
+                
                 // Get the target directory to update
                 const targetDir = target === '/' || target === '' 
                   ? '/mnt/results' 
                   : (target.startsWith('/mnt/results') ? target : `/mnt/results/${target}`);
+                
+                operationProgress = 98;
                 
                 // Immediately fetch and provide updated data to replace temp files
                 // Use a small delay to ensure the file system has updated
@@ -224,15 +262,53 @@
                     // Provide updated data to SVAR to replace temp entries with actual files
                     api.exec('provide-data', { data: updatedItems, id: targetDir });
                   }
+                  
+                  operationProgress = 100;
+                  setTimeout(() => {
+                    operationInProgress = false;
+                    operationMessage = null;
+                    operationProgress = 0;
+                  }, 300);
                 }, 100);
                 
                 // Continue with the intercepted event
                 return ev;
               } catch (err) {
                 console.error('Error handling copy-files:', err);
+                operationInProgress = false;
+                operationMessage = null;
+                operationProgress = 0;
                 alert(`Error copying files: ${err instanceof Error ? err.message : 'Unknown error'}`);
                 return false; // Prevent the operation in SVAR
               }
+            });
+            
+            // Handle delete operation
+            api.on('delete-files', async (ev: any) => {
+              const ids = ev.ids || [];
+              operationInProgress = true;
+              operationMessage = `Deleting ${ids.length} file(s)...`;
+              operationProgress = 0;
+              // Note: Delete API would need to be implemented
+              // For now, just show progress
+              setTimeout(() => {
+                operationInProgress = false;
+                operationMessage = null;
+                operationProgress = 0;
+              }, 1000);
+            });
+            
+            // Handle create operation
+            api.on('create-files', async (_ev: any) => {
+              operationInProgress = true;
+              operationMessage = 'Creating file...';
+              operationProgress = 50;
+              // Note: Create API would need to be implemented
+              setTimeout(() => {
+                operationInProgress = false;
+                operationMessage = null;
+                operationProgress = 0;
+              }, 1000);
             });
             
             // Handle request-data event for dynamic folder loading
