@@ -1,0 +1,64 @@
+# AWS EKS PersistentVolume using EFS (Simplified version without access points)
+# This is a simpler configuration that uses the EFS file system directly
+# Prerequisites:
+# 1. EFS CSI driver installed: https://docs.aws.amazon.com/eks/latest/userguide/efs-csi.html
+# 2. EFS file system created in AWS
+#
+# To use this:
+# 1. Create an EFS file system: aws efs create-file-system --creation-token argo-workflow-pv
+# 2. Get the file system ID from the output
+# 3. Replace <EFS_FILE_SYSTEM_ID> below with your EFS ID
+# 4. Apply this file: kubectl apply -f infrastructure/k8s/pv-aws-efs-simple.yaml
+
+apiVersion: v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: task-results-pvc
+  namespace: argo
+spec:
+  storageClassName: efs-sc
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  # Note: With EFS CSI driver, the PV will be automatically provisioned
+  # You just need to specify the EFS file system ID in the StorageClass parameters
+  # or use the simpler approach with a static PV (see below)
+---
+# Alternative: Static PV approach (uncomment and configure if you prefer)
+# apiVersion: v1
+# kind: PersistentVolume
+# metadata:
+#   name: task-results-pv-efs
+# spec:
+#   storageClassName: efs-sc
+#   capacity:
+#     storage: 10Gi
+#   accessModes:
+#     - ReadWriteMany
+#   csi:
+#     driver: efs.csi.aws.com
+#     volumeHandle: <EFS_FILE_SYSTEM_ID>  # Replace with your EFS file system ID
+#   persistentVolumeReclaimPolicy: Retain
+# ---
+# apiVersion: v1
+# kind: PersistentVolumeClaim
+# metadata:
+#   name: task-results-pvc
+#   namespace: argo
+# spec:
+#   storageClassName: ""  # Empty to use the static PV
+#   accessModes:
+#     - ReadWriteMany
+#   resources:
+#     requests:
+#       storage: 10Gi
+#   volumeName: task-results-pv-efs
+
