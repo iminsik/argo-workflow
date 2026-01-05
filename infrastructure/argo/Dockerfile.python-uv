@@ -1,0 +1,12 @@
+# Dockerfile for Python tasks with uv package manager
+FROM python:3.11-slim
+
+# Install uv
+RUN pip install --no-cache-dir uv
+
+# Set working directory
+WORKDIR /workspace
+
+# Default command
+CMD ["python"]
+

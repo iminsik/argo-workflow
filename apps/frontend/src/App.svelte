@@ -41,12 +41,18 @@
   let showSubmitModal = $state(false);
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
+  let dependencies = $state('');
+  let requirementsFile = $state('');
+  let showDependencies = $state(false);
   let submitting = $state(false);
 
-  // Reset pythonCode when dialog closes
+  // Reset form when dialog closes
   $effect(() => {
     if (!showSubmitModal) {
       pythonCode = defaultPythonCode;
+      dependencies = '';
+      requirementsFile = '';
+      showDependencies = false;
     }
   });
 
@@ -470,12 +476,20 @@
   async function runTask() {
     try {
       submitting = true;
+      const requestBody: any = { pythonCode };
+      if (dependencies.trim()) {
+        requestBody.dependencies = dependencies.trim();
+      }
+      if (requirementsFile.trim()) {
+        requestBody.requirementsFile = requirementsFile.trim();
+      }
+      
       const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ pythonCode }),
+        body: JSON.stringify(requestBody),
       });
       
       if (!res.ok) {
@@ -776,6 +790,53 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         📖 Load: Read from PV
       </Button>
     </div>
+    
+    <div class="mb-4">
+      <Button
+        onclick={() => showDependencies = !showDependencies}
+        variant="outline"
+        size="sm"
+        disabled={submitting}
+      >
+        {showDependencies ? '▼' : '▶'} Dependencies (Optional)
+      </Button>
+    </div>
+
+    {#if showDependencies}
+      <div class="mb-4 p-4 border rounded bg-muted/50">
+        <div class="mb-4">
+          <label class="block text-sm font-medium mb-2">
+            Package Dependencies (space or comma-separated)
+          </label>
+          <input
+            type="text"
+            bind:value={dependencies}
+            placeholder="e.g., numpy pandas requests"
+            class="w-full px-3 py-2 border rounded bg-background"
+            disabled={submitting}
+          />
+          <p class="text-xs text-muted-foreground mt-1">
+            Example: numpy pandas requests or numpy==1.24.0 pandas>=2.0.0
+          </p>
+        </div>
+        
+        <div class="mb-2">
+          <label class="block text-sm font-medium mb-2">
+            Requirements File (alternative to package list)
+          </label>
+          <textarea
+            bind:value={requirementsFile}
+            placeholder="numpy==1.24.0&#10;pandas>=2.0.0&#10;requests==2.31.0"
+            class="w-full px-3 py-2 border rounded bg-background font-mono text-sm"
+            rows="5"
+            disabled={submitting}
+          />
+          <p class="text-xs text-muted-foreground mt-1">
+            Enter requirements.txt format. If provided, this takes precedence over package dependencies.
+          </p>
+        </div>
+      </div>
+    {/if}
     
     <div class="flex-1 min-h-[400px] mb-6">
       <MonacoEditor bind:value={pythonCode} language="python" theme="vs-dark" height="400px" />
