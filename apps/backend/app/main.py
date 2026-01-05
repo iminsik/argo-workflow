@@ -258,34 +258,87 @@ def save_logs_to_database(run_id: int, logs: list, db: Session, task_id: str = N
                     )
                     db.add(db_log)
             elif has_task_id and task_id:
-                # Old schema: use task_id (fallback)
-                # Use raw SQL to avoid ORM issues with missing run_id column
-                existing = db.execute(
-                    text("SELECT id FROM task_logs WHERE task_id = :task_id AND node_id = :node_id AND pod_name = :pod_name"),
-                    {"task_id": task_id, "node_id": log_entry["node"], "pod_name": log_entry["pod"]}
-                ).fetchone()
-                
-                if existing:
-                    # Update existing entry
-                    db.execute(
-                        text("UPDATE task_logs SET logs = :logs, phase = :phase WHERE id = :id"),
-                        {"logs": log_entry["logs"], "phase": log_entry["phase"], "id": existing[0]}
-                    )
-                else:
-                    # Create new entry
-                    now = datetime.utcnow()
-                    db.execute(
-                        text("INSERT INTO task_logs (task_id, node_id, pod_name, phase, logs, created_at, updated_at) VALUES (:task_id, :node_id, :pod_name, :phase, :logs, :created_at, :updated_at)"),
+                # Old schema: use task_id, but filter by workflow_id when checking/updating
+                # Join with task_runs to ensure we're working with logs for the correct run
+                if workflow_id:
+                    # In old schema, we need to ensure logs are associated with the specific run
+                    # Since task_logs only has task_id, we need to use pod_name to distinguish runs
+                    # Pod names in Argo usually contain the workflow_id, so we can use that
+                    # Check if log exists for this specific workflow_id (run) by matching pod_name pattern
+                    existing = db.execute(
+                        text("""
+                            SELECT tl.id FROM task_logs tl
+                            WHERE tl.task_id = :task_id 
+                            AND tl.node_id = :node_id 
+                            AND (tl.pod_name = :pod_name OR tl.pod_name LIKE :workflow_pattern)
+                        """),
                         {
-                            "task_id": task_id,
-                            "node_id": log_entry["node"],
+                            "task_id": task_id, 
+                            "node_id": log_entry["node"], 
                             "pod_name": log_entry["pod"],
-                            "phase": log_entry["phase"],
-                            "logs": log_entry["logs"],
-                            "created_at": now,
-                            "updated_at": now
+                            "workflow_pattern": f"%{workflow_id}%"
                         }
-                    )
+                    ).fetchone()
+                    
+                    if existing:
+                        # Update existing entry
+                        db.execute(
+                            text("UPDATE task_logs SET logs = :logs, phase = :phase, updated_at = :updated_at WHERE id = :id"),
+                            {
+                                "logs": log_entry["logs"], 
+                                "phase": log_entry["phase"], 
+                                "id": existing[0],
+                                "updated_at": datetime.utcnow()
+                            }
+                        )
+                    else:
+                        # Create new entry (pod_name should be unique per workflow/run)
+                        now = datetime.utcnow()
+                        db.execute(
+                            text("INSERT INTO task_logs (task_id, node_id, pod_name, phase, logs, created_at, updated_at) VALUES (:task_id, :node_id, :pod_name, :phase, :logs, :created_at, :updated_at)"),
+                            {
+                                "task_id": task_id,
+                                "node_id": log_entry["node"],
+                                "pod_name": log_entry["pod"],
+                                "phase": log_entry["phase"],
+                                "logs": log_entry["logs"],
+                                "created_at": now,
+                                "updated_at": now
+                            }
+                        )
+                else:
+                    # Fallback: if no workflow_id, use task_id (less precise)
+                    existing = db.execute(
+                        text("SELECT id FROM task_logs WHERE task_id = :task_id AND node_id = :node_id AND pod_name = :pod_name"),
+                        {"task_id": task_id, "node_id": log_entry["node"], "pod_name": log_entry["pod"]}
+                    ).fetchone()
+                    
+                    if existing:
+                        # Update existing entry
+                        db.execute(
+                            text("UPDATE task_logs SET logs = :logs, phase = :phase, updated_at = :updated_at WHERE id = :id"),
+                            {
+                                "logs": log_entry["logs"], 
+                                "phase": log_entry["phase"], 
+                                "id": existing[0],
+                                "updated_at": datetime.utcnow()
+                            }
+                        )
+                    else:
+                        # Create new entry
+                        now = datetime.utcnow()
+                        db.execute(
+                            text("INSERT INTO task_logs (task_id, node_id, pod_name, phase, logs, created_at, updated_at) VALUES (:task_id, :node_id, :pod_name, :phase, :logs, :created_at, :updated_at)"),
+                            {
+                                "task_id": task_id,
+                                "node_id": log_entry["node"],
+                                "pod_name": log_entry["pod"],
+                                "phase": log_entry["phase"],
+                                "logs": log_entry["logs"],
+                                "created_at": now,
+                                "updated_at": now
+                            }
+                        )
             else:
                 # Schema not migrated and no task_id provided - skip saving
                 print(f"Warning: Cannot save logs - schema not migrated and task_id not provided")
@@ -330,11 +383,31 @@ def get_logs_from_database(run_id: int, db: Session, task_id: str = None, workfl
                 for log in db_logs
             ]
         elif has_task_id and task_id:
-            # Old schema: use task_id with raw SQL (TaskLog model doesn't have task_id attribute)
-            log_rows = db.execute(
-                text("SELECT node_id, pod_name, phase, logs FROM task_logs WHERE task_id = :task_id ORDER BY created_at"),
-                {"task_id": task_id}
-            ).fetchall()
+            # Old schema: filter by workflow_id by joining with task_runs
+            # This ensures each run shows its own logs, not all logs for the task
+            if workflow_id:
+                # Join with task_runs to filter by workflow_id
+                # Also filter by pod_name pattern that matches the workflow_id to ensure we only get logs for this specific run
+                log_rows = db.execute(
+                    text("""
+                        SELECT DISTINCT tl.node_id, tl.pod_name, tl.phase, tl.logs 
+                        FROM task_logs tl
+                        INNER JOIN task_runs tr ON tl.task_id = tr.task_id
+                        WHERE tr.workflow_id = :workflow_id
+                        AND (tl.pod_name LIKE :workflow_pattern OR tl.node_id = :workflow_id)
+                        ORDER BY tl.created_at
+                    """),
+                    {
+                        "workflow_id": workflow_id,
+                        "workflow_pattern": f"%{workflow_id}%"
+                    }
+                ).fetchall()
+            else:
+                # Fallback: if no workflow_id, use task_id (will show all runs' logs)
+                log_rows = db.execute(
+                    text("SELECT node_id, pod_name, phase, logs FROM task_logs WHERE task_id = :task_id ORDER BY created_at"),
+                    {"task_id": task_id}
+                ).fetchall()
             
             return [
                 {
@@ -853,24 +926,77 @@ REQ_EOF
                 db.add(task_run)
                 db.commit()
             else:
-                # Old schema: use raw SQL to avoid ORM trying to insert non-existent columns
-                # Task must already be committed for foreign key constraint
-                result = db.execute(
-                    text("""
-                        INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
-                        VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
-                        RETURNING id
-                    """),
-                    {
-                        "task_id": task_id,
-                        "workflow_id": workflow_id,
-                        "run_number": next_run_number,
-                        "phase": "Pending",
-                        "created_at": datetime.utcnow()
-                    }
-                )
-                db.commit()
-                # Note: In old schema, code is stored in Task, not TaskRun
+                # Old schema: Try to add columns dynamically if they don't exist, then save code
+                # This allows code to be saved per run even without a full migration
+                try:
+                    # Check if columns exist and add them if not
+                    inspector = sql_inspect(engine)
+                    existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+                    
+                    if 'python_code' not in existing_columns:
+                        # Add columns dynamically
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS python_code TEXT"))
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS dependencies TEXT"))
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS requirements_file TEXT"))
+                        db.commit()
+                        # Refresh inspector
+                        inspector = sql_inspect(engine)
+                        existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+                    
+                    # Now insert with code if columns exist
+                    if 'python_code' in existing_columns:
+                        result = db.execute(
+                            text("""
+                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, created_at)
+                                VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :created_at)
+                                RETURNING id
+                            """),
+                            {
+                                "task_id": task_id,
+                                "workflow_id": workflow_id,
+                                "run_number": next_run_number,
+                                "phase": "Pending",
+                                "python_code": request.pythonCode,
+                                "dependencies": request.dependencies if request.dependencies else None,
+                                "requirements_file": request.requirementsFile if request.requirementsFile else None,
+                                "created_at": datetime.utcnow()
+                            }
+                        )
+                    else:
+                        # Fallback: insert without code columns
+                        result = db.execute(
+                            text("""
+                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
+                                VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
+                                RETURNING id
+                            """),
+                            {
+                                "task_id": task_id,
+                                "workflow_id": workflow_id,
+                                "run_number": next_run_number,
+                                "phase": "Pending",
+                                "created_at": datetime.utcnow()
+                            }
+                        )
+                    db.commit()
+                except Exception as e:
+                    # If adding columns fails, fall back to basic insert
+                    print(f"Warning: Could not add code columns to task_runs: {e}")
+                    result = db.execute(
+                        text("""
+                            INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
+                            VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
+                            RETURNING id
+                        """),
+                        {
+                            "task_id": task_id,
+                            "workflow_id": workflow_id,
+                            "run_number": next_run_number,
+                            "phase": "Pending",
+                            "created_at": datetime.utcnow()
+                        }
+                    )
+                    db.commit()
             
             return {
                 "id": task_id,
@@ -1063,14 +1189,16 @@ async def get_task(task_id: str):
                     "createdAt": run.created_at.isoformat()
                 }
             else:
-                # Old schema: run is a Row object, use task's code
+                # Old schema: run is a Row object
+                # NOTE: In old schema, code is NOT saved per run, so all runs show Task's code
+                # This is expected behavior until database is migrated to add python_code column to task_runs
                 # SQLAlchemy Row objects support column name access
                 run_data = {
                     "id": getattr(run, 'id', run[0]),
                     "runNumber": getattr(run, 'run_number', run[3] if len(run) > 3 else 0),
                     "workflowId": getattr(run, 'workflow_id', run[2] if len(run) > 2 else ""),
                     "phase": getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"),
-                    "pythonCode": task.python_code,  # Fallback to task's code
+                    "pythonCode": task.python_code,  # In old schema, code is only in Task, not TaskRun
                     "dependencies": task.dependencies or "",
                     "requirementsFile": task.requirements_file or "",
                     "startedAt": (getattr(run, 'started_at', None) or (run[5] if len(run) > 5 else None)),
