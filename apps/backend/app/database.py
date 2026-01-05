@@ -50,6 +50,9 @@ class TaskRun(Base):
     workflow_id = Column(String, index=True, nullable=False)  # Argo workflow name
     run_number = Column(Integer, nullable=False)  # Sequential run number for this task
     phase = Column(String, nullable=False, default="Pending")
+    python_code = Column(Text, nullable=False)  # Snapshot of code used for this run
+    dependencies = Column(Text, nullable=True)  # Snapshot of dependencies used for this run
+    requirements_file = Column(Text, nullable=True)  # Snapshot of requirements file used for this run
     started_at = Column(DateTime, nullable=True)
     finished_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

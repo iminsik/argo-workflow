@@ -273,14 +273,17 @@ def save_logs_to_database(run_id: int, logs: list, db: Session, task_id: str = N
                     )
                 else:
                     # Create new entry
+                    now = datetime.utcnow()
                     db.execute(
-                        text("INSERT INTO task_logs (task_id, node_id, pod_name, phase, logs) VALUES (:task_id, :node_id, :pod_name, :phase, :logs)"),
+                        text("INSERT INTO task_logs (task_id, node_id, pod_name, phase, logs, created_at, updated_at) VALUES (:task_id, :node_id, :pod_name, :phase, :logs, :created_at, :updated_at)"),
                         {
                             "task_id": task_id,
                             "node_id": log_entry["node"],
                             "pod_name": log_entry["pod"],
                             "phase": log_entry["phase"],
-                            "logs": log_entry["logs"]
+                            "logs": log_entry["logs"],
+                            "created_at": now,
+                            "updated_at": now
                         }
                     )
             else:
@@ -779,11 +782,29 @@ REQ_EOF
                 task.requirements_file = request.requirementsFile if request.requirementsFile else None
                 task.updated_at = datetime.utcnow()
                 
-                # Get next run number
-                max_run = db.query(TaskRun).filter(TaskRun.task_id == request.taskId).order_by(TaskRun.run_number.desc()).first()
-                next_run_number = (max_run.run_number + 1) if max_run else 1
+                # Get next run number (check schema first to avoid querying non-existent columns)
+                from sqlalchemy import inspect as sql_inspect, text
+                from app.database import engine
+                inspector = sql_inspect(engine)
+                task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+                has_python_code = 'python_code' in task_runs_columns
+                
+                if has_python_code:
+                    max_run = db.query(TaskRun).filter(TaskRun.task_id == request.taskId).order_by(TaskRun.run_number.desc()).first()
+                    next_run_number = (max_run.run_number + 1) if max_run else 1
+                else:
+                    result = db.execute(
+                        text("SELECT run_number FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+                        {"task_id": request.taskId}
+                    ).fetchone()
+                    if result:
+                        next_run_number = (getattr(result, 'run_number', result[0]) + 1) if result else 1
+                    else:
+                        next_run_number = 1
                 
                 task_id = request.taskId
+                # Commit task update before creating TaskRun
+                db.commit()
             else:
                 # New task: create Task record
                 task_id = f"task-{uuid.uuid4().hex[:12]}"
@@ -795,16 +816,50 @@ REQ_EOF
                 )
                 db.add(task)
                 next_run_number = 1
+                # Commit Task first to ensure foreign key constraint is satisfied
+                db.commit()
             
-            # Create TaskRun record
-            task_run = TaskRun(
-                task_id=task_id,
-                workflow_id=workflow_id,
-                run_number=next_run_number,
-                phase="Pending"
-            )
-            db.add(task_run)
-            db.commit()
+            # Create TaskRun record with code snapshot (if schema supports it)
+            # Note: has_python_code is already set for reruns, need to check again for new tasks
+            if not request.taskId:
+                from sqlalchemy import inspect as sql_inspect, text
+                from app.database import engine
+                inspector = sql_inspect(engine)
+                task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+                has_python_code = 'python_code' in task_runs_columns
+            
+            if has_python_code:
+                # New schema: store code in TaskRun using ORM
+                task_run = TaskRun(
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    run_number=next_run_number,
+                    phase="Pending",
+                    python_code=request.pythonCode,
+                    dependencies=request.dependencies if request.dependencies else None,
+                    requirements_file=request.requirementsFile if request.requirementsFile else None
+                )
+                db.add(task_run)
+                db.commit()
+            else:
+                # Old schema: use raw SQL to avoid ORM trying to insert non-existent columns
+                # Task must already be committed for foreign key constraint
+                result = db.execute(
+                    text("""
+                        INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
+                        VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
+                        RETURNING id
+                    """),
+                    {
+                        "task_id": task_id,
+                        "workflow_id": workflow_id,
+                        "run_number": next_run_number,
+                        "phase": "Pending",
+                        "created_at": datetime.utcnow()
+                    }
+                )
+                db.commit()
+                # Note: In old schema, code is stored in Task, not TaskRun
             
             return {
                 "id": task_id,
@@ -844,12 +899,42 @@ async def list_tasks():
         
         task_list = []
         for task in tasks:
-            # Get latest run
-            latest_run = db.query(TaskRun).filter(
-                TaskRun.task_id == task.id
-            ).order_by(TaskRun.run_number.desc()).first()
+            # Get latest run (handle schema migration)
+            from sqlalchemy import inspect as sql_inspect
+            from app.database import engine
+            inspector = sql_inspect(engine)
+            task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+            has_python_code = 'python_code' in task_runs_columns
+            
+            # Query only columns that exist
+            if has_python_code:
+                latest_run = db.query(TaskRun).filter(
+                    TaskRun.task_id == task.id
+                ).order_by(TaskRun.run_number.desc()).first()
+            else:
+                # Old schema: query without code columns
+                from sqlalchemy import text
+                result = db.execute(
+                    text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+                    {"task_id": task.id}
+                ).fetchone()
+                latest_run = result  # Will be a Row object, not TaskRun
             
             if latest_run:
+                # Handle both TaskRun object and Row object from raw SQL
+                if has_python_code:
+                    # New schema: latest_run is a TaskRun object
+                    workflow_id = latest_run.workflow_id
+                    run_phase = latest_run.phase
+                    run_started_at = latest_run.started_at
+                    run_finished_at = latest_run.finished_at
+                else:
+                    # Old schema: latest_run is a Row object - SQLAlchemy Row supports column name access
+                    workflow_id = getattr(latest_run, 'workflow_id', latest_run[2])
+                    run_phase = getattr(latest_run, 'phase', latest_run[4] if len(latest_run) > 4 else "Pending")
+                    run_started_at = getattr(latest_run, 'started_at', latest_run[5] if len(latest_run) > 5 else None)
+                    run_finished_at = getattr(latest_run, 'finished_at', latest_run[6] if len(latest_run) > 6 else None)
+                
                 # Sync phase from Kubernetes
                 try:
                     workflow = custom_api.get_namespaced_custom_object(
@@ -857,13 +942,13 @@ async def list_tasks():
                         version="v1alpha1",
                         namespace=namespace,
                         plural="workflows",
-                        name=latest_run.workflow_id
+                        name=workflow_id
                     )
                     status = workflow.get("status", {})
                     phase = determine_workflow_phase(status)
                     
-                    # Update run phase if changed
-                    if latest_run.phase != phase:
+                    # Update run phase if changed (only if we have a TaskRun object)
+                    if has_python_code and latest_run.phase != phase:
                         latest_run.phase = phase
                         try:
                             if status.get("startedAt"):
@@ -879,14 +964,19 @@ async def list_tasks():
                         except Exception as dt_error:
                             print(f"Error parsing datetime: {dt_error}")
                         db.commit()
+                        run_phase = phase
+                        run_started_at = latest_run.started_at
+                        run_finished_at = latest_run.finished_at
+                    else:
+                        phase = run_phase
                     
-                    started_at = latest_run.started_at.isoformat() if latest_run.started_at else ""
-                    finished_at = latest_run.finished_at.isoformat() if latest_run.finished_at else ""
+                    started_at = run_started_at.isoformat() if run_started_at else ""
+                    finished_at = run_finished_at.isoformat() if run_finished_at else ""
                 except Exception as e:
                     # Workflow might not exist in Kubernetes anymore
-                    phase = latest_run.phase
-                    started_at = latest_run.started_at.isoformat() if latest_run.started_at else ""
-                    finished_at = latest_run.finished_at.isoformat() if latest_run.finished_at else ""
+                    phase = run_phase
+                    started_at = run_started_at.isoformat() if run_started_at else ""
+                    finished_at = run_finished_at.isoformat() if run_finished_at else ""
             else:
                 phase = "Pending"
                 started_at = ""
@@ -900,8 +990,8 @@ async def list_tasks():
                 "createdAt": task.created_at.isoformat(),
                 "pythonCode": task.python_code,
                 "dependencies": task.dependencies or "",
-                "runCount": db.query(TaskRun).filter(TaskRun.task_id == task.id).count(),
-                "latestRunNumber": latest_run.run_number if latest_run else 0
+                "runCount": db.query(TaskRun).filter(TaskRun.task_id == task.id).count() if has_python_code else len([r for r in db.execute(text("SELECT id FROM task_runs WHERE task_id = :task_id"), {"task_id": task.id}).fetchall()]),
+                "latestRunNumber": (latest_run.run_number if has_python_code else getattr(latest_run, 'run_number', latest_run[3] if len(latest_run) > 3 else 0)) if latest_run else 0
             })
         
         db.close()
@@ -924,34 +1014,97 @@ async def get_task(task_id: str):
             db.close()
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         
+        # Check if schema supports code in runs
+        from sqlalchemy import inspect as sql_inspect
+        from app.database import engine
+        inspector = sql_inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
         # Get all runs for this task
-        runs = db.query(TaskRun).filter(
-            TaskRun.task_id == task_id
-        ).order_by(TaskRun.run_number.desc()).all()
+        if has_python_code:
+            runs = db.query(TaskRun).filter(
+                TaskRun.task_id == task_id
+            ).order_by(TaskRun.run_number.desc()).all()
+        else:
+            # Old schema: use raw SQL
+            from sqlalchemy import text
+            run_rows = db.execute(
+                text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC"),
+                {"task_id": task_id}
+            ).fetchall()
+            runs = run_rows  # Will be list of Row objects
         
         run_list = []
         for run in runs:
-            run_list.append({
-                "id": run.id,
-                "runNumber": run.run_number,
-                "workflowId": run.workflow_id,
-                "phase": run.phase,
-                "startedAt": run.started_at.isoformat() if run.started_at else "",
-                "finishedAt": run.finished_at.isoformat() if run.finished_at else "",
-                "createdAt": run.created_at.isoformat()
-            })
+            if has_python_code:
+                # New schema: run is a TaskRun object
+                run_data = {
+                    "id": run.id,
+                    "runNumber": run.run_number,
+                    "workflowId": run.workflow_id,
+                    "phase": run.phase,
+                    "pythonCode": run.python_code,
+                    "dependencies": run.dependencies or "",
+                    "requirementsFile": run.requirements_file or "",
+                    "startedAt": run.started_at.isoformat() if run.started_at else "",
+                    "finishedAt": run.finished_at.isoformat() if run.finished_at else "",
+                    "createdAt": run.created_at.isoformat()
+                }
+            else:
+                # Old schema: run is a Row object, use task's code
+                # SQLAlchemy Row objects support column name access
+                run_data = {
+                    "id": getattr(run, 'id', run[0]),
+                    "runNumber": getattr(run, 'run_number', run[3] if len(run) > 3 else 0),
+                    "workflowId": getattr(run, 'workflow_id', run[2] if len(run) > 2 else ""),
+                    "phase": getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"),
+                    "pythonCode": task.python_code,  # Fallback to task's code
+                    "dependencies": task.dependencies or "",
+                    "requirementsFile": task.requirements_file or "",
+                    "startedAt": (getattr(run, 'started_at', None) or (run[5] if len(run) > 5 else None)),
+                    "finishedAt": (getattr(run, 'finished_at', None) or (run[6] if len(run) > 6 else None)),
+                    "createdAt": (getattr(run, 'created_at', None) or (run[7] if len(run) > 7 else None))
+                }
+                # Convert datetime objects to ISO format strings
+                if run_data["startedAt"] and hasattr(run_data["startedAt"], 'isoformat'):
+                    run_data["startedAt"] = run_data["startedAt"].isoformat()
+                if run_data["finishedAt"] and hasattr(run_data["finishedAt"], 'isoformat'):
+                    run_data["finishedAt"] = run_data["finishedAt"].isoformat()
+                if run_data["createdAt"] and hasattr(run_data["createdAt"], 'isoformat'):
+                    run_data["createdAt"] = run_data["createdAt"].isoformat()
+                # Ensure empty strings if None
+                run_data["startedAt"] = run_data["startedAt"] or ""
+                run_data["finishedAt"] = run_data["finishedAt"] or ""
+                run_data["createdAt"] = run_data["createdAt"] or ""
+            run_list.append(run_data)
         
         db.close()
         
-        return {
-            "id": task.id,
-            "pythonCode": task.python_code,
-            "dependencies": task.dependencies or "",
-            "requirementsFile": task.requirements_file or "",
-            "createdAt": task.created_at.isoformat(),
-            "updatedAt": task.updated_at.isoformat(),
-            "runs": run_list
-        }
+        # Return task info with latest run's code (for backward compatibility)
+        latest_run = runs[0] if runs else None
+        if latest_run and has_python_code:
+            # New schema: use latest run's code
+            return {
+                "id": task.id,
+                "pythonCode": latest_run.python_code,
+                "dependencies": latest_run.dependencies or "",
+                "requirementsFile": latest_run.requirements_file or "",
+                "createdAt": task.created_at.isoformat(),
+                "updatedAt": task.updated_at.isoformat(),
+                "runs": run_list
+            }
+        else:
+            # Old schema or no runs: use task's code
+            return {
+                "id": task.id,
+                "pythonCode": task.python_code,
+                "dependencies": task.dependencies or "",
+                "requirementsFile": task.requirements_file or "",
+                "createdAt": task.created_at.isoformat(),
+                "updatedAt": task.updated_at.isoformat(),
+                "runs": run_list
+            }
     except HTTPException:
         raise
     except Exception as e:
@@ -965,14 +1118,34 @@ async def get_run_logs(task_id: str, run_number: int, db: Session = Depends(get_
     Get logs for a specific run of a task.
     """
     try:
+        # Check schema and get run appropriately
+        from sqlalchemy import inspect as sql_inspect, text
+        from app.database import engine
+        inspector = sql_inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
         # Get the run
-        run = db.query(TaskRun).filter(
-            TaskRun.task_id == task_id,
-            TaskRun.run_number == run_number
-        ).first()
+        if has_python_code:
+            run = db.query(TaskRun).filter(
+                TaskRun.task_id == task_id,
+                TaskRun.run_number == run_number
+            ).first()
+        else:
+            result = db.execute(
+                text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id AND run_number = :run_number LIMIT 1"),
+                {"task_id": task_id, "run_number": run_number}
+            ).fetchone()
+            run = result
         
         if not run:
             raise HTTPException(status_code=404, detail=f"Run {run_number} not found for task {task_id}")
+        
+        # Get workflow_id (handle both TaskRun objects and Row objects)
+        if has_python_code:
+            workflow_id = run.workflow_id
+        else:
+            workflow_id = getattr(run, 'workflow_id', run[2] if len(run) > 2 else None)
         
         namespace = os.getenv("ARGO_NAMESPACE", "argo")
         custom_api = CustomObjectsApi()
@@ -984,25 +1157,49 @@ async def get_run_logs(task_id: str, run_number: int, db: Session = Depends(get_
                 version="v1alpha1",
                 namespace=namespace,
                 plural="workflows",
-                name=run.workflow_id
+                name=workflow_id
             )
             status = workflow.get("status", {})
             current_workflow_phase = determine_workflow_phase(status)
             
+            # Get current phase (handle both TaskRun objects and Row objects)
+            current_phase = run.phase if has_python_code else (getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"))
+            
             # Update run phase if changed
-            if run.phase != current_workflow_phase:
-                run.phase = current_workflow_phase
-                if status.get("startedAt"):
-                    run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
-                if status.get("finishedAt"):
-                    run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
-                db.commit()
+            if current_phase != current_workflow_phase:
+                if has_python_code:
+                    # New schema: update TaskRun object
+                    run.phase = current_workflow_phase
+                    if status.get("startedAt"):
+                        run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
+                    if status.get("finishedAt"):
+                        run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
+                    db.commit()
+                else:
+                    # Old schema: update using raw SQL
+                    run_id_val = getattr(run, 'id', run[0] if len(run) > 0 else None)
+                    update_params = {"run_id": run_id_val, "phase": current_workflow_phase}
+                    update_sql = "UPDATE task_runs SET phase = :phase"
+                    
+                    if status.get("startedAt"):
+                        started_str = status.get("startedAt").replace("Z", "+00:00")
+                        update_sql += ", started_at = :started_at"
+                        update_params["started_at"] = datetime.fromisoformat(started_str)
+                    if status.get("finishedAt"):
+                        finished_str = status.get("finishedAt").replace("Z", "+00:00")
+                        update_sql += ", finished_at = :finished_at"
+                        update_params["finished_at"] = datetime.fromisoformat(finished_str)
+                    
+                    update_sql += " WHERE id = :run_id"
+                    db.execute(text(update_sql), update_params)
+                    db.commit()
         except Exception as e:
             print(f"Could not fetch workflow status: {e}")
-            current_workflow_phase = run.phase
+            current_workflow_phase = run.phase if has_python_code else (getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"))
         
         # First, try to get logs from database
-        db_logs = get_logs_from_database(run.id, db, task_id=task_id, workflow_id=run.workflow_id)
+        run_id_val = run.id if has_python_code else (getattr(run, 'id', run[0] if len(run) > 0 else None))
+        db_logs = get_logs_from_database(run_id_val, db, task_id=task_id, workflow_id=workflow_id)
         
         # If we have logs in database, check if phase needs updating
         if db_logs and current_workflow_phase:
@@ -1055,20 +1252,47 @@ async def get_task_logs(task_id: str, run_number: int = None, db: Session = Depe
         if not task:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         
+        # Check schema and get run appropriately
+        from sqlalchemy import inspect as sql_inspect, text
+        from app.database import engine
+        inspector = sql_inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
         # Get the run
         if run_number:
-            run = db.query(TaskRun).filter(
-                TaskRun.task_id == task_id,
-                TaskRun.run_number == run_number
-            ).first()
+            if has_python_code:
+                run = db.query(TaskRun).filter(
+                    TaskRun.task_id == task_id,
+                    TaskRun.run_number == run_number
+                ).first()
+            else:
+                result = db.execute(
+                    text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id AND run_number = :run_number LIMIT 1"),
+                    {"task_id": task_id, "run_number": run_number}
+                ).fetchone()
+                run = result
         else:
             # Get latest run
-            run = db.query(TaskRun).filter(
-                TaskRun.task_id == task_id
-            ).order_by(TaskRun.run_number.desc()).first()
+            if has_python_code:
+                run = db.query(TaskRun).filter(
+                    TaskRun.task_id == task_id
+                ).order_by(TaskRun.run_number.desc()).first()
+            else:
+                result = db.execute(
+                    text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+                    {"task_id": task_id}
+                ).fetchone()
+                run = result
         
         if not run:
             return {"logs": [], "source": "database", "runNumber": 0}
+        
+        # Get workflow_id (handle both TaskRun objects and Row objects)
+        if has_python_code:
+            workflow_id = run.workflow_id
+        else:
+            workflow_id = getattr(run, 'workflow_id', run[2] if len(run) > 2 else None)
         
         # Call get_run_logs logic directly
         namespace = os.getenv("ARGO_NAMESPACE", "argo")
@@ -1081,25 +1305,52 @@ async def get_task_logs(task_id: str, run_number: int = None, db: Session = Depe
                 version="v1alpha1",
                 namespace=namespace,
                 plural="workflows",
-                name=run.workflow_id
+                name=workflow_id
             )
             status = workflow.get("status", {})
             current_workflow_phase = determine_workflow_phase(status)
             
+            # Get current phase (handle both TaskRun objects and Row objects)
+            current_phase = run.phase if has_python_code else (getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"))
+            
             # Update run phase if changed
-            if run.phase != current_workflow_phase:
-                run.phase = current_workflow_phase
-                if status.get("startedAt"):
-                    run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
-                if status.get("finishedAt"):
-                    run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
-                db.commit()
+            if current_phase != current_workflow_phase:
+                if has_python_code:
+                    # New schema: update TaskRun object
+                    run.phase = current_workflow_phase
+                    if status.get("startedAt"):
+                        run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
+                    if status.get("finishedAt"):
+                        run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
+                    db.commit()
+                else:
+                    # Old schema: update using raw SQL
+                    run_id_val = getattr(run, 'id', run[0] if len(run) > 0 else None)
+                    update_params = {"run_id": run_id_val, "phase": current_workflow_phase}
+                    update_sql = "UPDATE task_runs SET phase = :phase"
+                    
+                    if status.get("startedAt"):
+                        started_str = status.get("startedAt").replace("Z", "+00:00")
+                        update_sql += ", started_at = :started_at"
+                        update_params["started_at"] = datetime.fromisoformat(started_str)
+                    if status.get("finishedAt"):
+                        finished_str = status.get("finishedAt").replace("Z", "+00:00")
+                        update_sql += ", finished_at = :finished_at"
+                        update_params["finished_at"] = datetime.fromisoformat(finished_str)
+                    
+                    update_sql += " WHERE id = :run_id"
+                    db.execute(text(update_sql), update_params)
+                    db.commit()
         except Exception as e:
             print(f"Could not fetch workflow status: {e}")
-            current_workflow_phase = run.phase
+            current_workflow_phase = run.phase if has_python_code else (getattr(run, 'phase', run[4] if len(run) > 4 else "Pending"))
+        
+        # Get run_id and run_number (handle both TaskRun objects and Row objects)
+        run_id_val = run.id if has_python_code else (getattr(run, 'id', run[0] if len(run) > 0 else None))
+        run_number_val = run.run_number if has_python_code else (getattr(run, 'run_number', run[3] if len(run) > 3 else 0))
         
         # Get logs from database
-        db_logs = get_logs_from_database(run.id, db, task_id=task_id, workflow_id=run.workflow_id)
+        db_logs = get_logs_from_database(run_id_val, db, task_id=task_id, workflow_id=workflow_id)
         
         # Update phases if needed
         if db_logs and current_workflow_phase:
@@ -1110,19 +1361,19 @@ async def get_task_logs(task_id: str, run_number: int = None, db: Session = Depe
                         log_entry["phase"] = current_workflow_phase
                         needs_update = True
             if needs_update:
-                save_logs_to_database(run.id, db_logs, db, task_id=task_id, workflow_id=run.workflow_id)
+                save_logs_to_database(run_id_val, db_logs, db, task_id=task_id, workflow_id=workflow_id)
         
         if db_logs:
-            return {"logs": db_logs, "source": "database", "runId": run.id, "runNumber": run.run_number}
+            return {"logs": db_logs, "source": "database", "runId": run_id_val, "runNumber": run_number_val}
         
         # Fetch from Kubernetes
         try:
-            k8s_logs = fetch_logs_from_kubernetes(run.workflow_id)
+            k8s_logs = fetch_logs_from_kubernetes(workflow_id)
             if k8s_logs:
-                save_logs_to_database(run.id, k8s_logs, db, task_id=task_id, workflow_id=run.workflow_id)
-                return {"logs": k8s_logs, "source": "kubernetes", "runId": run.id, "runNumber": run.run_number}
+                save_logs_to_database(run_id_val, k8s_logs, db, task_id=task_id, workflow_id=workflow_id)
+                return {"logs": k8s_logs, "source": "kubernetes", "runId": run_id_val, "runNumber": run_number_val}
             else:
-                return {"logs": [], "source": "kubernetes", "runId": run.id, "runNumber": run.run_number}
+                return {"logs": [], "source": "kubernetes", "runId": run_id_val, "runNumber": run_number_val}
         except Exception as k8s_error:
             print(f"Could not fetch logs from Kubernetes: {k8s_error}")
             return {"logs": [], "source": "error", "error": str(k8s_error), "runId": run.id, "runNumber": run.run_number}
@@ -1148,10 +1399,25 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
     # Get database session
     db = SessionLocal()
     
-    # Get the latest run for this task
-    latest_run = db.query(TaskRun).filter(
-        TaskRun.task_id == task_id
-    ).order_by(TaskRun.run_number.desc()).first()
+    # Get the latest run for this task (handle schema migration)
+    from sqlalchemy import inspect as sql_inspect, text
+    from app.database import engine
+    inspector = sql_inspect(engine)
+    task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+    has_python_code = 'python_code' in task_runs_columns
+    
+    if has_python_code:
+        # New schema: use ORM
+        latest_run = db.query(TaskRun).filter(
+            TaskRun.task_id == task_id
+        ).order_by(TaskRun.run_number.desc()).first()
+    else:
+        # Old schema: use raw SQL
+        result = db.execute(
+            text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+            {"task_id": task_id}
+        ).fetchone()
+        latest_run = result  # Will be a Row object
     
     if not latest_run:
         await websocket.send_json({
@@ -1161,8 +1427,13 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
         db.close()
         return
     
-    workflow_id = latest_run.workflow_id
-    run_id = latest_run.id
+    # Handle both TaskRun objects and Row objects
+    if has_python_code:
+        workflow_id = latest_run.workflow_id
+        run_id = latest_run.id
+    else:
+        run_id = getattr(latest_run, 'id', latest_run[0] if len(latest_run) > 0 else None)
+        workflow_id = getattr(latest_run, 'workflow_id', latest_run[2] if len(latest_run) > 2 else None)
     
     last_logs_hash = ""
     last_sent_logs = []
@@ -1170,7 +1441,7 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
     
     # Helper function to fetch and send logs
     async def fetch_and_send_logs():
-        nonlocal last_logs_hash, last_sent_logs, last_sent_phase
+        nonlocal last_logs_hash, last_sent_logs, last_sent_phase, latest_run
         try:
             # Get workflow status using workflow_id
             workflow = custom_api.get_namespaced_custom_object(
@@ -1184,23 +1455,58 @@ async def websocket_logs(websocket: WebSocket, task_id: str):
             status = workflow.get("status", {})
             phase = determine_workflow_phase(status)
             
+            # Get current phase (handle both TaskRun objects and Row objects)
+            current_phase = latest_run.phase if has_python_code else (getattr(latest_run, 'phase', latest_run[4] if len(latest_run) > 4 else "Pending"))
+            
             # Update run phase if changed
-            if latest_run.phase != phase:
-                latest_run.phase = phase
-                try:
-                    if status.get("startedAt"):
-                        started_str = status.get("startedAt")
-                        if started_str.endswith("Z"):
-                            started_str = started_str.replace("Z", "+00:00")
-                        latest_run.started_at = datetime.fromisoformat(started_str)
-                    if status.get("finishedAt"):
-                        finished_str = status.get("finishedAt")
-                        if finished_str.endswith("Z"):
-                            finished_str = finished_str.replace("Z", "+00:00")
-                        latest_run.finished_at = datetime.fromisoformat(finished_str)
-                except Exception as dt_error:
-                    print(f"Error parsing datetime: {dt_error}")
-                db.commit()
+            if current_phase != phase:
+                if has_python_code:
+                    # New schema: update TaskRun object
+                    latest_run.phase = phase
+                    try:
+                        if status.get("startedAt"):
+                            started_str = status.get("startedAt")
+                            if started_str.endswith("Z"):
+                                started_str = started_str.replace("Z", "+00:00")
+                            latest_run.started_at = datetime.fromisoformat(started_str)
+                        if status.get("finishedAt"):
+                            finished_str = status.get("finishedAt")
+                            if finished_str.endswith("Z"):
+                                finished_str = finished_str.replace("Z", "+00:00")
+                            latest_run.finished_at = datetime.fromisoformat(finished_str)
+                    except Exception as dt_error:
+                        print(f"Error parsing datetime: {dt_error}")
+                    db.commit()
+                else:
+                    # Old schema: update using raw SQL
+                    update_params = {"run_id": run_id, "phase": phase}
+                    update_sql = "UPDATE task_runs SET phase = :phase"
+                    
+                    try:
+                        if status.get("startedAt"):
+                            started_str = status.get("startedAt")
+                            if started_str.endswith("Z"):
+                                started_str = started_str.replace("Z", "+00:00")
+                            update_sql += ", started_at = :started_at"
+                            update_params["started_at"] = datetime.fromisoformat(started_str)
+                        if status.get("finishedAt"):
+                            finished_str = status.get("finishedAt")
+                            if finished_str.endswith("Z"):
+                                finished_str = finished_str.replace("Z", "+00:00")
+                            update_sql += ", finished_at = :finished_at"
+                            update_params["finished_at"] = datetime.fromisoformat(finished_str)
+                    except Exception as dt_error:
+                        print(f"Error parsing datetime: {dt_error}")
+                    
+                    update_sql += " WHERE id = :run_id"
+                    db.execute(text(update_sql), update_params)
+                    db.commit()
+                    
+                    # Refresh latest_run by re-querying
+                    latest_run = db.execute(
+                        text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE id = :run_id"),
+                        {"run_id": run_id}
+                    ).fetchone()
             
             # Try to get logs from database first (using run_id)
             db_logs = get_logs_from_database(run_id, db, task_id=task_id, workflow_id=workflow_id)
@@ -1378,24 +1684,47 @@ async def delete_task(task_id: str, db: Session = Depends(get_db)):
         if not task:
             raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
         
+        # Check schema and get runs appropriately
+        from sqlalchemy import text, inspect
+        from app.database import engine
+        inspector = inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
         # Get all runs for this task to delete workflows
-        runs = db.query(TaskRun).filter(TaskRun.task_id == task_id).all()
+        if has_python_code:
+            # New schema: use ORM
+            runs = db.query(TaskRun).filter(TaskRun.task_id == task_id).all()
+        else:
+            # Old schema: use raw SQL
+            run_rows = db.execute(
+                text("SELECT id, workflow_id FROM task_runs WHERE task_id = :task_id"),
+                {"task_id": task_id}
+            ).fetchall()
+            runs = run_rows
         
         # Delete workflows from Kubernetes
         for run in runs:
-            try:
-                api_instance.delete_namespaced_custom_object(
-                    group="argoproj.io",
-                    version="v1alpha1",
-                    namespace=namespace,
-                    plural="workflows",
-                    name=run.workflow_id
-                )
-                deleted_workflows += 1
-            except Exception as k8s_error:
-                # If workflow doesn't exist in Kubernetes, that's okay
-                if "404" not in str(k8s_error) and "Not Found" not in str(k8s_error):
-                    print(f"Warning: Could not delete workflow {run.workflow_id}: {k8s_error}")
+            # Handle both TaskRun objects and Row objects
+            if has_python_code:
+                workflow_id = run.workflow_id
+            else:
+                workflow_id = getattr(run, 'workflow_id', run[1] if len(run) > 1 else None)
+            
+            if workflow_id:
+                try:
+                    api_instance.delete_namespaced_custom_object(
+                        group="argoproj.io",
+                        version="v1alpha1",
+                        namespace=namespace,
+                        plural="workflows",
+                        name=workflow_id
+                    )
+                    deleted_workflows += 1
+                except Exception as k8s_error:
+                    # If workflow doesn't exist in Kubernetes, that's okay
+                    if "404" not in str(k8s_error) and "Not Found" not in str(k8s_error):
+                        print(f"Warning: Could not delete workflow {workflow_id}: {k8s_error}")
         
         # Delete task from database
         # Manually delete runs first to avoid ORM relationship loading issues with unmigrated schema
@@ -1415,8 +1744,10 @@ async def delete_task(task_id: str, db: Session = Depends(get_db)):
             if has_run_id:
                 # New schema: delete logs via run_id
                 for run in runs:
-                    log_count = db.execute(text("DELETE FROM task_logs WHERE run_id = :run_id"), {"run_id": run.id}).rowcount
-                    deleted_logs += log_count
+                    run_id = run.id if has_python_code else (getattr(run, 'id', run[0]) if len(run) > 0 else None)
+                    if run_id:
+                        log_count = db.execute(text("DELETE FROM task_logs WHERE run_id = :run_id"), {"run_id": run_id}).rowcount
+                        deleted_logs += log_count
             elif has_task_id:
                 # Old schema: delete logs via task_id
                 deleted_logs = db.execute(text("DELETE FROM task_logs WHERE task_id = :task_id"), {"task_id": task_id}).rowcount
@@ -1424,10 +1755,13 @@ async def delete_task(task_id: str, db: Session = Depends(get_db)):
             
             # Delete runs manually (to avoid ORM cascade loading relationships)
             for run in runs:
-                db.execute(text("DELETE FROM task_runs WHERE id = :run_id"), {"run_id": run.id})
+                run_id = run.id if has_python_code else (getattr(run, 'id', run[0]) if len(run) > 0 else None)
+                if run_id:
+                    db.execute(text("DELETE FROM task_runs WHERE id = :run_id"), {"run_id": run_id})
             
-            # Finally delete the task
-            db.delete(task)
+            # Finally delete the task using raw SQL to avoid ORM cascade issues
+            # Using raw SQL prevents SQLAlchemy from trying to load relationships with non-existent columns
+            db.execute(text("DELETE FROM tasks WHERE id = :task_id"), {"task_id": task_id})
             db.commit()
             
             print(f"Deleted task {task_id}: {deleted_runs} runs, {deleted_logs} log entries, {deleted_workflows} workflows")

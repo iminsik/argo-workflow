@@ -10,6 +10,9 @@
     runNumber: number;
     workflowId: string;
     phase: string;
+    pythonCode: string;
+    dependencies?: string;
+    requirementsFile?: string;
     startedAt: string;
     finishedAt: string;
     createdAt: string;
@@ -48,6 +51,11 @@
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   let dialogOpen = $state(true);
+  
+  // Get the selected run's code and dependencies
+  const selectedRun = $derived(runs.find(r => r.runNumber === selectedRunNumber));
+  const displayCode = $derived(selectedRun?.pythonCode || task.pythonCode);
+  const displayDependencies = $derived(selectedRun?.dependencies || task.dependencies);
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -104,6 +112,7 @@
     if (onLoadRunLogs && activeTab === 'logs') {
       await onLoadRunLogs(task.id, runNumber);
     }
+    // Code tab will automatically update via reactive $derived variables
   }
 </script>
 
@@ -121,15 +130,15 @@
           {task.message}
         </Badge>
       {/if}
-      {#if task.dependencies}
+      {#if displayDependencies}
         <Badge variant="outline" class="max-w-md">
-          📦 Dependencies: {task.dependencies}
+          📦 Dependencies: {displayDependencies}
         </Badge>
       {/if}
     </div>
     <div class="flex gap-2">
       <Button
-        onclick={() => onRerun({ pythonCode: task.pythonCode, dependencies: task.dependencies }, task.id)}
+        onclick={() => onRerun({ pythonCode: displayCode, dependencies: displayDependencies }, task.id)}
         variant="default"
       >
         <Play size={16} class="mr-2" /> Edit & Rerun
@@ -205,20 +214,20 @@
   <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
     {#if activeTab === 'code'}
       <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
-        {#if task.dependencies}
+        {#if displayDependencies}
           <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
             <div class="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1 flex items-center gap-2">
               <span>📦</span>
               <span>Dependencies</span>
             </div>
-            <div class="text-sm text-blue-800 dark:text-blue-200 font-mono break-words">{task.dependencies}</div>
+            <div class="text-sm text-blue-800 dark:text-blue-200 font-mono break-words">{displayDependencies}</div>
           </div>
         {/if}
         <div class="flex-1 min-h-0 overflow-hidden">
-          {#if task.pythonCode}
+          {#if displayCode}
             <div class="h-full w-full">
               <MonacoEditor 
-                value={task.pythonCode} 
+                value={displayCode} 
                 language="python" 
                 theme="vs-dark" 
                 height="100%"
