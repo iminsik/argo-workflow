@@ -15,6 +15,7 @@
     finishedAt: string;
     createdAt: string;
     pythonCode: string;
+    dependencies?: string;
     message?: string;
   }
 

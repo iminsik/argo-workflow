@@ -10,6 +10,7 @@
       id: string;
       phase: string;
       pythonCode: string;
+      dependencies?: string;
       message?: string;
     };
     activeTab: 'code' | 'logs';
@@ -72,6 +73,11 @@
           {task.message}
         </Badge>
       {/if}
+      {#if task.dependencies}
+        <Badge variant="outline" class="max-w-md">
+          📦 Dependencies: {task.dependencies}
+        </Badge>
+      {/if}
     </div>
     <div class="flex gap-2">
       {#if canCancel}
@@ -110,22 +116,33 @@
   <!-- Tab Content -->
   <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
     {#if activeTab === 'code'}
-      <div class="flex-1 min-h-0 overflow-hidden">
-        {#if task.pythonCode}
-          <div class="h-full w-full">
-            <MonacoEditor 
-              value={task.pythonCode} 
-              language="python" 
-              theme="vs-dark" 
-              height="100%"
-              readonly={true}
-            />
-          </div>
-        {:else}
-          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
-            No Python code available
+      <div class="flex-1 flex flex-col min-h-0 overflow-hidden">
+        {#if task.dependencies}
+          <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
+            <div class="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1 flex items-center gap-2">
+              <span>📦</span>
+              <span>Dependencies</span>
+            </div>
+            <div class="text-sm text-blue-800 dark:text-blue-200 font-mono break-words">{task.dependencies}</div>
           </div>
         {/if}
+        <div class="flex-1 min-h-0 overflow-hidden">
+          {#if task.pythonCode}
+            <div class="h-full w-full">
+              <MonacoEditor 
+                value={task.pythonCode} 
+                language="python" 
+                theme="vs-dark" 
+                height="100%"
+                readonly={true}
+              />
+            </div>
+          {:else}
+            <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+              No Python code available
+            </div>
+          {/if}
+        </div>
       </div>
     {:else}
       <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm whitespace-pre-wrap">

@@ -666,8 +666,9 @@ async def list_tasks():
             started_at = status.get("startedAt") or status.get("startTime") or ""
             finished_at = status.get("finishedAt") or status.get("finishTime") or ""
             
-            # Extract Python code from workflow spec
+            # Extract Python code and dependencies from workflow spec
             python_code = ""
+            dependencies = ""
             templates = spec.get("templates", [])
             if templates:
                 # Get the first template (entrypoint)
@@ -688,11 +689,18 @@ async def list_tasks():
                 
                 # Check for script template (tasks with dependencies)
                 script = template.get("script", {})
-                if script and not python_code:
+                if script:
                     env = script.get("env", [])
+                    # Extract Python code if not already found
+                    if not python_code:
+                        for env_var in env:
+                            if env_var.get("name") == "PYTHON_CODE":
+                                python_code = env_var.get("value", "")
+                                break
+                    # Extract dependencies
                     for env_var in env:
-                        if env_var.get("name") == "PYTHON_CODE":
-                            python_code = env_var.get("value", "")
+                        if env_var.get("name") == "DEPENDENCIES":
+                            dependencies = env_var.get("value", "")
                             break
             
             # Get workflow message/conditions for debugging
@@ -707,6 +715,7 @@ async def list_tasks():
                 "finishedAt": finished_at,
                 "createdAt": metadata.get("creationTimestamp", ""),
                 "pythonCode": python_code,
+                "dependencies": dependencies,
                 "message": message,  # Add message for debugging
             })
         
