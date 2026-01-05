@@ -908,7 +908,7 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     </div>
   </Dialog>
 
-  <Dialog bind:open={showPVFileManager} class="max-w-6xl w-[95%] max-h-[90vh] overflow-auto flex flex-col">
+  <Dialog bind:open={showPVFileManager} closeOnEscape={false} class="max-w-6xl w-[95%] max-h-[90vh] overflow-auto flex flex-col">
     <div class="mb-6">
       <h2 class="text-2xl font-semibold">Persistent Volume File Manager</h2>
     </div>

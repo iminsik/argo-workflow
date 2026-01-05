@@ -5,12 +5,14 @@
   interface DialogProps {
     open?: boolean;
     onOpenChange?: (open: boolean) => void;
+    closeOnEscape?: boolean;
   }
 
   let {
     open = $bindable(false),
     onOpenChange,
     children = $bindable(),
+    closeOnEscape = true,
     ...rest
   }: DialogProps & { children?: import('svelte').Snippet } = $props();
 
@@ -39,7 +41,7 @@
       role="dialog"
       aria-modal="true"
       tabindex="-1"
-      onkeydown={(e) => e.key === 'Escape' && handleClose()}
+      onkeydown={(e) => e.key === 'Escape' && closeOnEscape && handleClose()}
       onmousedown={(e) => e.stopPropagation()}
       ontouchstart={(e) => e.stopPropagation()}
     >
