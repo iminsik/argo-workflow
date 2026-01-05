@@ -672,16 +672,28 @@ async def list_tasks():
             if templates:
                 # Get the first template (entrypoint)
                 template = templates[0]
+                
+                # Check for container template (simple tasks without dependencies)
                 container = template.get("container", {})
-                args = container.get("args", [])
-                if args:
-                    # The Python code is typically in the first arg
-                    python_code = args[0] if isinstance(args[0], str) else ""
-                elif container.get("command"):
-                    # If no args, check if command contains the code
-                    command = container.get("command", [])
-                    if command and len(command) > 1:
-                        python_code = " ".join(command)
+                if container:
+                    args = container.get("args", [])
+                    if args:
+                        # The Python code is typically in the first arg
+                        python_code = args[0] if isinstance(args[0], str) else ""
+                    elif container.get("command"):
+                        # If no args, check if command contains the code
+                        command = container.get("command", [])
+                        if command and len(command) > 1:
+                            python_code = " ".join(command)
+                
+                # Check for script template (tasks with dependencies)
+                script = template.get("script", {})
+                if script and not python_code:
+                    env = script.get("env", [])
+                    for env_var in env:
+                        if env_var.get("name") == "PYTHON_CODE":
+                            python_code = env_var.get("value", "")
+                            break
             
             # Get workflow message/conditions for debugging
             message = status.get("message", "")
