@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { Play, RefreshCw, X, XCircle, Trash2 } from 'lucide-svelte';
+  import { Play, RefreshCw, X, XCircle, Trash2, FolderOpen } from 'lucide-svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import TaskRow from './TaskRow.svelte';
   import TaskDialog from './TaskDialog.svelte';
+  import PVFileManager from './PVFileManager.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
 
@@ -40,6 +41,7 @@
   let taskLogs = $state<LogEntry[]>([]);
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
+  let showPVFileManager = $state(false);
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
@@ -694,6 +696,12 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         <RefreshCw size={20} class="mr-2" /> Refresh
       </Button>
       <Button 
+        onclick={() => showPVFileManager = true}
+        variant="outline"
+      >
+        <FolderOpen size={20} class="mr-2" /> PV File Manager
+      </Button>
+      <Button 
         onclick={() => showSubmitModal = true}
         variant="default"
       >
@@ -895,6 +903,22 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
           <Play size={18} class="ml-2" />
         {/if}
       </Button>
+    </div>
+  </Dialog>
+
+  <Dialog bind:open={showPVFileManager} class="max-w-6xl w-[95%] max-h-[90vh] overflow-auto flex flex-col">
+    <div class="flex justify-between items-center mb-6">
+      <h2 class="text-2xl font-semibold">Persistent Volume File Manager</h2>
+      <Button
+        onclick={() => showPVFileManager = false}
+        variant="ghost"
+        size="sm"
+      >
+        <X size={20} />
+      </Button>
+    </div>
+    <div class="flex-1 overflow-auto">
+      <PVFileManager />
     </div>
   </Dialog>
 </div>

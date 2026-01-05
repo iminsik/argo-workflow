@@ -1936,3 +1936,350 @@ async def delete_task(task_id: str, db: Session = Depends(get_db)):
 async def handle_callback(data: dict):
     print(f"Callback: {data}")
     return {"status": "ok"}
+
+
+# PV File Manager APIs
+@app.get("/api/v1/pv/files")
+async def list_pv_files(path: str = "/mnt/results"):
+    """
+    List files and directories in the PV.
+    Returns data in format compatible with SVAR Svelte File Manager.
+    """
+    namespace = os.getenv("ARGO_NAMESPACE", "argo")
+    core_api = CoreV1Api()
+    
+    # Validate path to prevent directory traversal
+    if not path.startswith("/mnt/results"):
+        raise HTTPException(status_code=400, detail="Path must be within /mnt/results")
+    
+    pod_name = f"pv-reader-{uuid.uuid4().hex[:8]}"
+    
+    try:
+        # Create a temporary pod to access the PV
+        pod_manifest = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "namespace": namespace,
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [
+                    {
+                        "name": "reader",
+                        "image": "python:3.11-slim",
+                        "command": ["python", "-c"],
+                        "args": [
+                            f"""
+import os
+import json
+import stat
+from datetime import datetime
+
+path = "{path}"
+
+if not os.path.exists(path):
+    print(json.dumps({{"error": f"Path does not exist: {{path}}"}}))
+    exit(1)
+
+if not os.path.isdir(path):
+    print(json.dumps({{"error": f"Path is not a directory: {{path}}"}}))
+    exit(1)
+
+items = []
+for item in sorted(os.listdir(path)):
+    item_path = os.path.join(path, item)
+    try:
+        stat_info = os.stat(item_path)
+        is_dir = os.path.isdir(item_path)
+        
+        # Format date
+        mtime = datetime.fromtimestamp(stat_info.st_mtime)
+        date_str = mtime.strftime("%Y-%m-%dT%H:%M:%SZ")
+        
+        items.append({{
+            "id": item_path,
+            "name": item,
+            "type": "folder" if is_dir else "file",
+            "size": stat_info.st_size if not is_dir else 0,
+            "date": date_str
+        }})
+    except Exception as e:
+        # Skip items we can't access
+        continue
+
+print(json.dumps({{"items": items}}))
+"""
+                        ],
+                        "volumeMounts": [
+                            {
+                                "name": "task-results",
+                                "mountPath": "/mnt/results"
+                            }
+                        ]
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "task-results",
+                        "persistentVolumeClaim": {
+                            "claimName": "task-results-pvc"
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # Create the pod
+        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        
+        # Wait for pod to be ready
+        import time
+        max_wait = 30
+        waited = 0
+        while waited < max_wait:
+            try:
+                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+                if pod.status.phase == "Succeeded":
+                    break
+                elif pod.status.phase == "Failed":
+                    raise HTTPException(status_code=500, detail="Pod failed to execute")
+            except Exception:
+                pass
+            time.sleep(1)
+            waited += 1
+        
+        if waited >= max_wait:
+            raise HTTPException(status_code=500, detail="Pod did not complete in time")
+        
+        # Get logs from the pod
+        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="reader")
+        
+        # Parse JSON from logs
+        try:
+            # Clean up the logs - remove any leading/trailing whitespace
+            log_lines = logs.strip().split('\n')
+            # Find the JSON line (should be the last line or the one with {})
+            json_str = None
+            for line in reversed(log_lines):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    json_str = line
+                    break
+            
+            if not json_str:
+                # Try to extract JSON from the entire output
+                import re
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+            
+            if not json_str:
+                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
+            
+            # Try to parse as JSON first
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, try to parse as Python dict (handle single quotes)
+                # Replace single quotes with double quotes, but be careful with escaped quotes
+                import ast
+                try:
+                    # Use ast.literal_eval to safely parse Python dict syntax
+                    result = ast.literal_eval(json_str)
+                except (ValueError, SyntaxError):
+                    # Last resort: try to fix common issues
+                    # Replace single quotes with double quotes (simple approach)
+                    fixed_json = json_str.replace("'", '"')
+                    result = json.loads(fixed_json)
+            
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            
+            # Return in SVAR File Manager format
+            return {"data": result.get("items", [])}
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error accessing PV: {str(e)}")
+    finally:
+        # Clean up the pod
+        try:
+            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        except Exception:
+            pass  # Ignore cleanup errors
+
+
+@app.get("/api/v1/pv/file")
+async def read_pv_file(path: str):
+    """
+    Read file content from the PV.
+    Returns file content as text or base64 for binary files.
+    """
+    namespace = os.getenv("ARGO_NAMESPACE", "argo")
+    core_api = CoreV1Api()
+    
+    # Validate path
+    if not path.startswith("/mnt/results"):
+        raise HTTPException(status_code=400, detail="Path must be within /mnt/results")
+    
+    pod_name = f"pv-reader-{uuid.uuid4().hex[:8]}"
+    
+    try:
+        # Create a temporary pod to read the file
+        pod_manifest = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "namespace": namespace,
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [
+                    {
+                        "name": "reader",
+                        "image": "python:3.11-slim",
+                        "command": ["python", "-c"],
+                        "args": [
+                            f"""
+import os
+import json
+import base64
+
+path = "{path}"
+
+if not os.path.exists(path):
+    print(json.dumps({{"error": f"File does not exist: {{path}}"}}))
+    exit(1)
+
+if os.path.isdir(path):
+    print(json.dumps({{"error": f"Path is a directory: {{path}}"}}))
+    exit(1)
+
+# Try to read as text first
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    print(json.dumps({{"content": content, "encoding": "text"}}))
+except UnicodeDecodeError:
+    # If text fails, read as binary and encode as base64
+    with open(path, "rb") as f:
+        content_bytes = f.read()
+    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
+    print(json.dumps({{"content": content_b64, "encoding": "base64"}}))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+    exit(1)
+"""
+                        ],
+                        "volumeMounts": [
+                            {
+                                "name": "task-results",
+                                "mountPath": "/mnt/results"
+                            }
+                        ]
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "task-results",
+                        "persistentVolumeClaim": {
+                            "claimName": "task-results-pvc"
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # Create the pod
+        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        
+        # Wait for pod to be ready
+        import time
+        max_wait = 30
+        waited = 0
+        while waited < max_wait:
+            try:
+                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+                if pod.status.phase == "Succeeded":
+                    break
+                elif pod.status.phase == "Failed":
+                    raise HTTPException(status_code=500, detail="Pod failed to execute")
+            except Exception:
+                pass
+            time.sleep(1)
+            waited += 1
+        
+        if waited >= max_wait:
+            raise HTTPException(status_code=500, detail="Pod did not complete in time")
+        
+        # Get logs from the pod
+        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="reader")
+        
+        # Parse JSON from logs
+        try:
+            # Clean up the logs - remove any leading/trailing whitespace
+            log_lines = logs.strip().split('\n')
+            # Find the JSON line (should be the last line or the one with {})
+            json_str = None
+            for line in reversed(log_lines):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    json_str = line
+                    break
+            
+            if not json_str:
+                # Try to extract JSON from the entire output
+                import re
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+            
+            if not json_str:
+                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
+            
+            # Try to parse as JSON first
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                # If JSON parsing fails, try to parse as Python dict (handle single quotes)
+                import ast
+                try:
+                    # Use ast.literal_eval to safely parse Python dict syntax
+                    result = ast.literal_eval(json_str)
+                except (ValueError, SyntaxError):
+                    # Last resort: try to fix common issues
+                    # Replace single quotes with double quotes (simple approach)
+                    fixed_json = json_str.replace("'", '"')
+                    result = json.loads(fixed_json)
+            
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+    finally:
+        # Clean up the pod
+        try:
+            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        except Exception:
+            pass  # Ignore cleanup errors
