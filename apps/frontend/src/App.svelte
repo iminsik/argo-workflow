@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy, untrack } from 'svelte';
-  import { Play, RefreshCw, X, XCircle, Trash2 } from 'lucide-svelte';
+  import { Play, RefreshCw, X, XCircle, Trash2, FolderOpen } from 'lucide-svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import TaskRow from './TaskRow.svelte';
   import TaskDialog from './TaskDialog.svelte';
+  import PVFileManager from './PVFileManager.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
 
@@ -40,6 +41,7 @@
   let taskLogs = $state<LogEntry[]>([]);
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
+  let showPVFileManager = $state(false);
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
@@ -694,6 +696,12 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         <RefreshCw size={20} class="mr-2" /> Refresh
       </Button>
       <Button 
+        onclick={() => showPVFileManager = true}
+        variant="outline"
+      >
+        <FolderOpen size={20} class="mr-2" /> PV File Manager
+      </Button>
+      <Button 
         onclick={() => showSubmitModal = true}
         variant="default"
       >
@@ -840,10 +848,11 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     {#if showDependencies}
       <div class="mb-4 p-4 border rounded bg-muted/50">
         <div class="mb-4">
-          <label class="block text-sm font-medium mb-2">
+          <label for="dependencies-input" class="block text-sm font-medium mb-2">
             Package Dependencies (space or comma-separated)
           </label>
           <input
+            id="dependencies-input"
             type="text"
             bind:value={dependencies}
             placeholder="e.g., numpy pandas requests"
@@ -856,16 +865,17 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         </div>
         
         <div class="mb-2">
-          <label class="block text-sm font-medium mb-2">
+          <label for="requirements-file-input" class="block text-sm font-medium mb-2">
             Requirements File (alternative to package list)
           </label>
           <textarea
+            id="requirements-file-input"
             bind:value={requirementsFile}
             placeholder="numpy==1.24.0&#10;pandas>=2.0.0&#10;requests==2.31.0"
             class="w-full px-3 py-2 border rounded bg-background font-mono text-sm"
             rows="5"
             disabled={submitting}
-          />
+          ></textarea>
           <p class="text-xs text-muted-foreground mt-1">
             Enter requirements.txt format. If provided, this takes precedence over package dependencies.
           </p>
@@ -895,6 +905,15 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
           <Play size={18} class="ml-2" />
         {/if}
       </Button>
+    </div>
+  </Dialog>
+
+  <Dialog bind:open={showPVFileManager} closeOnEscape={false} class="max-w-6xl w-[95%] max-h-[90vh] overflow-auto flex flex-col">
+    <div class="mb-6">
+      <h2 class="text-2xl font-semibold">Persistent Volume File Manager</h2>
+    </div>
+    <div class="flex-1 overflow-auto">
+      <PVFileManager />
     </div>
   </Dialog>
 </div>
