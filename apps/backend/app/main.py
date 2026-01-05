@@ -2437,15 +2437,15 @@ async def copy_pv_file(source_path: str, destination_path: str):
 @app.post("/api/v1/pv/upload")
 async def upload_pv_file(
     file: UploadFile = File(...),
-    destination_path: str = Form("/mnt/results"),
-    target: str = Form(None)  # Alternative parameter name for SVAR compatibility
+    path: str = Form(...)  # Target directory path (SVAR recommended format)
 ):
     """
     Upload a file to the PV.
     Uses persistent pod for fast execution.
+    Following SVAR's recommended API format.
     """
-    # Use target if provided (SVAR compatibility), otherwise use destination_path
-    dest_path = target if target else destination_path
+    # Use path parameter (SVAR recommended)
+    dest_path = path
     
     # Validate destination path
     if not dest_path.startswith("/mnt/results"):
@@ -2461,6 +2461,8 @@ async def upload_pv_file(
         
         # Determine final file path
         filename = file.filename or "uploaded_file"
+        print(f"Upload request: filename={filename}, dest_path={dest_path}")
+        
         # Ensure dest_path is a directory (ends with /) or handle it
         if dest_path.endswith("/"):
             final_path = f"{dest_path}{filename}"
@@ -2469,6 +2471,8 @@ async def upload_pv_file(
             # For simplicity, assume it's a directory if it doesn't have an extension
             # or if it's a known directory path
             final_path = f"{dest_path}/{filename}"
+        
+        print(f"Final file path: {final_path}")
         
         # Escape path for shell command
         escaped_path = final_path.replace("'", "'\"'\"'")
@@ -2484,7 +2488,9 @@ async def upload_pv_file(
             counter = 1
             while True:
                 new_filename = f"{base_name}_{counter}{extension}"
-                new_path = f"{destination_path.rstrip('/')}/{new_filename}"
+                # Use dest_path (which may have been normalized) instead of destination_path
+                dir_part = dest_path.rstrip('/') if not dest_path.endswith('/') else dest_path.rstrip('/')
+                new_path = f"{dir_part}/{new_filename}"
                 escaped_new_path = new_path.replace("'", "'\"'\"'")
                 check_output = pod.exec_command(f"test -f '{escaped_new_path}' && echo 'exists' || echo 'not_exists'").strip()
                 if check_output != "exists":
@@ -2495,10 +2501,12 @@ async def upload_pv_file(
         
         # Read file content
         file_content = await file.read()
+        print(f"File size: {len(file_content)} bytes")
         
         # Encode file content as base64 for safe transfer through shell
         import base64
         file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        print(f"Base64 encoded size: {len(file_content_b64)} characters")
         
         # Create directory if it doesn't exist
         dir_path = '/'.join(final_path.split('/')[:-1])
@@ -2506,34 +2514,77 @@ async def upload_pv_file(
         pod.exec_command(f"mkdir -p '{escaped_dir}'")
         
         # Write file using base64 decode in the pod
-        # Use a Python script to write the file to avoid shell escaping issues
-        python_script = f"""
+        # Use a two-step approach: first write base64 to temp file, then decode it
+        # This avoids shell command line length limits
+        b64_temp_path = f"/tmp/upload_{uuid.uuid4().hex[:8]}.b64"
+        escaped_b64_temp = b64_temp_path.replace("'", "'\"'\"'")
+        
+        # Step 1: Write base64 data to temp file in pod using heredoc
+        # This is more reliable than embedding in Python script for large files
+        write_b64_cmd = f"cat > '{escaped_b64_temp}' << 'EOFB64'\n{file_content_b64}\nEOFB64"
+        print(f"Writing base64 data to temp file in pod...")
+        write_output = pod.exec_command(write_b64_cmd)
+        if write_output and "error" in write_output.lower():
+            print(f"Warning writing base64 file: {write_output}")
+        
+        # Step 2: Decode base64 and write actual file
+        decode_script = f"""
 import base64
 import os
 
+b64_file = '{escaped_b64_temp}'
 file_path = '{escaped_path}'
-file_content_b64 = '''{file_content_b64}'''
 
-# Decode and write file
-file_content = base64.b64decode(file_content_b64)
-os.makedirs(os.path.dirname(file_path), exist_ok=True)
-with open(file_path, 'wb') as f:
-    f.write(file_content)
-
-print("success")
+try:
+    with open(b64_file, 'r') as f:
+        file_content_b64 = f.read()
+    
+    file_content = base64.b64decode(file_content_b64)
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, 'wb') as f:
+        f.write(file_content)
+    
+    # Clean up temp file
+    os.remove(b64_file)
+    print("success")
+except Exception as e:
+    print(f"error: {{str(e)}}")
+    # Try to clean up temp file even on error
+    try:
+        os.remove(b64_file)
+    except:
+        pass
+    import sys
+    sys.exit(1)
 """
-        
-        # Write script to temp file and execute
-        script_b64 = base64.b64encode(python_script.encode('utf-8')).decode('utf-8')
+        script_b64 = base64.b64encode(decode_script.encode('utf-8')).decode('utf-8')
         upload_command = f"echo {script_b64} | base64 -d > /tmp/upload_script.py && python3 /tmp/upload_script.py"
+        print(f"Executing upload command in pod...")
         output = pod.exec_command(upload_command)
+        print(f"Upload command output: {output[:500]}")  # Log first 500 chars
         
+        # Check for errors in output
         if "success" not in output:
-            raise HTTPException(status_code=500, detail=f"Upload failed: {output}")
+            # Check if file was actually created despite the message
+            verify_command = f"test -f '{escaped_path}' && echo 'file_exists' || echo 'file_not_exists'"
+            verify_output = pod.exec_command(verify_command).strip()
+            if verify_output != "file_exists":
+                print(f"Upload script output: {output}")
+                print(f"File path attempted: {final_path}")
+                raise HTTPException(status_code=500, detail=f"Upload failed: {output}")
+            else:
+                # File exists, so upload succeeded despite message
+                print(f"Upload succeeded (file exists), but script output: {output}")
+        else:
+            # Verify file was created
+            verify_command = f"test -f '{escaped_path}' && echo 'file_exists' || echo 'file_not_exists'"
+            verify_output = pod.exec_command(verify_command).strip()
+            if verify_output != "file_exists":
+                raise HTTPException(status_code=500, detail=f"Upload reported success but file not found at {final_path}")
         
+        # Return in SVAR recommended format
         return {
-            "status": "success",
-            "filename": filename,
+            "name": filename,
             "path": final_path,
             "size": len(file_content)
         }

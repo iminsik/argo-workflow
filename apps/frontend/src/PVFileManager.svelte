@@ -109,6 +109,112 @@
   }
 
 
+  // Handle uploads - following SVAR's recommended approach
+  const handleUpload = async (ev: any) => {
+    console.log('🔴 handleUpload called with:', ev);
+    console.log('🔴 ev.detail:', ev.detail);
+    console.log('🔴 ev type:', typeof ev);
+    console.log('🔴 ev keys:', Object.keys(ev || {}));
+    
+    // SVAR passes: { files: File[], target: string }
+    // Try multiple ways to extract files and target
+    const files = ev.detail?.files || ev.files || ev.data?.files || (ev.data?.file ? [ev.data.file] : []) || [];
+    const target = ev.detail?.target || ev.target || ev.data?.target || ev.destination || '/mnt/results';
+    
+    console.log('🔴 Extracted:', { files: files.length, target, filesArray: files });
+    
+    if (files.length === 0) {
+      console.log('No files to upload');
+      return;
+    }
+    
+    try {
+      operationInProgress = true;
+      operationMessage = `Uploading ${files.length} file(s)...`;
+      operationProgress = 0;
+      
+      // Determine target directory (ensure it's within /mnt/results)
+      let targetDir = target;
+      if (target === '/' || target === '') {
+        targetDir = '/mnt/results';
+      } else if (!target.startsWith('/mnt/results')) {
+        // If target is relative or doesn't start with /mnt/results, make it absolute
+        targetDir = `/mnt/results/${target.replace(/^\//, '')}`;
+      }
+      
+      console.log('Uploading to:', targetDir);
+      
+      // Upload each file
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        operationMessage = `Uploading ${file.name}... (${i + 1}/${files.length})`;
+        operationProgress = Math.round((i / files.length) * 90);
+        
+        // Create FormData as recommended
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('path', targetDir);  // Use 'path' as recommended
+        
+        // Upload file
+        const response = await fetch(`${apiUrl}/api/v1/pv/upload`, {
+          method: 'POST',
+          body: formData
+        });
+        
+        if (!response.ok) {
+          const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+          throw new Error(`Failed to upload ${file.name}: ${errorData.detail || 'Unknown error'}`);
+        }
+        
+        const uploadData = await response.json();
+        console.log('Uploaded:', uploadData);
+      }
+      
+      operationProgress = 100;
+      operationMessage = 'Upload complete!';
+      
+      // Refresh SVAR file manager - use exec('refresh') or provide-data
+      if (fileManagerApi) {
+        try {
+          // Try different refresh methods
+          if (typeof fileManagerApi.refresh === 'function') {
+            fileManagerApi.refresh();
+          } else if (typeof fileManagerApi.exec === 'function') {
+            // Refresh by providing updated data
+            const refreshResponse = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(targetDir)}`);
+            if (refreshResponse.ok) {
+              const refreshData = await refreshResponse.json();
+              const updatedItems = (refreshData.data || []).map((item: any) => ({
+                id: item.id,
+                size: item.size || 0,
+                date: new Date(item.date),
+                type: item.type
+              }));
+              fileManagerApi.exec('provide-data', { data: updatedItems, id: targetDir });
+            }
+          }
+        } catch (err) {
+          console.warn('Could not refresh file manager:', err);
+        }
+      }
+      
+      // Also refresh our file list
+      await fetchFiles(targetDir);
+      
+      setTimeout(() => {
+        operationInProgress = false;
+        operationMessage = null;
+        operationProgress = 0;
+      }, 500);
+    } catch (err) {
+      console.error('Upload error:', err);
+      operationInProgress = false;
+      operationMessage = null;
+      operationProgress = 0;
+      alert(`Error uploading files: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    }
+  };
+
   onMount(() => {
     fetchFiles();
   });
@@ -151,105 +257,75 @@
     <div class="mb-2 text-xs text-muted-foreground">
       Debug: {fileData.length} items loaded
     </div>
+    
+    <!-- Manual upload button (fallback if SVAR upload doesn't work) -->
+    <div class="mb-2">
+      <Button
+        onclick={async () => {
+          const input = document.createElement('input');
+          input.type = 'file';
+          input.multiple = true;
+          input.onchange = (e: any) => {
+            const files = Array.from(e.target.files || []);
+            if (files.length > 0) {
+              console.log('📁 Files selected via manual button:', files);
+              handleUpload({ detail: { files, target: currentPath } });
+            }
+          };
+          input.click();
+        }}
+        variant="outline"
+        size="sm"
+      >
+        Upload Files
+      </Button>
+    </div>
     <div class="h-[70vh] border rounded overflow-hidden">
       <Willow>
         <Filemanager 
           data={fileData}
           onOpen={handleFileOpen}
-          uploadUrl={`${apiUrl}/api/v1/pv/upload`}
+          on:upload={(ev) => {
+            console.log('🟢 on:upload event fired:', ev);
+            handleUpload(ev);
+          }}
+          upload={true}
+          uploadUrl={null}
           init={(api) => {
-            // Store the API reference
+            // Store the API reference for refresh
             fileManagerApi = api;
             
-            // Intercept upload-files to handle file uploads
-            api.intercept('upload-files', async (ev: any) => {
-              const files = ev.files || [];
-              const target = ev.target || '/mnt/results';
-              
-              if (files.length === 0) {
-                return ev; // Continue with default behavior if no files
-              }
-              
-              try {
-                operationInProgress = true;
-                operationMessage = `Uploading ${files.length} file(s)...`;
-                operationProgress = 0;
-                
-                const uploadedFiles: string[] = [];
-                const totalFiles = files.length;
-                
-                // Determine target directory
-                let targetDir = target;
-                if (target === '/' || target === '') {
-                  targetDir = '/mnt/results';
-                } else if (!target.startsWith('/mnt/results')) {
-                  targetDir = `/mnt/results/${target}`;
-                }
-                
-                // Upload each file
-                for (let i = 0; i < files.length; i++) {
-                  const file = files[i];
-                  operationMessage = `Uploading ${file.name}... (${i + 1}/${totalFiles})`;
-                  operationProgress = Math.round((i / totalFiles) * 90);
-                  
-                  // Create FormData for file upload
-                  const formData = new FormData();
-                  formData.append('file', file);
-                  formData.append('destination_path', targetDir);
-                  formData.append('target', targetDir);
-                  
-                  // Upload file
-                  const uploadResponse = await fetch(`${apiUrl}/api/v1/pv/upload`, {
-                    method: 'POST',
-                    body: formData
-                  });
-                  
-                  if (!uploadResponse.ok) {
-                    const errorData = await uploadResponse.json();
-                    throw new Error(`Failed to upload ${file.name}: ${errorData.detail || 'Unknown error'}`);
-                  }
-                  
-                  const uploadData = await uploadResponse.json();
-                  uploadedFiles.push(uploadData.path);
-                }
-                
-                operationMessage = 'Finalizing...';
-                operationProgress = 95;
-                
-                // Refresh file list
-                setTimeout(async () => {
-                  const refreshResponse = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(targetDir)}`);
-                  if (refreshResponse.ok) {
-                    const refreshData = await refreshResponse.json();
-                    const updatedItems = (refreshData.data || []).map((item: any) => ({
-                      id: item.id,
-                      size: item.size || 0,
-                      date: new Date(item.date),
-                      type: item.type
-                    }));
-                    
-                    api.exec('provide-data', { data: updatedItems, id: targetDir });
-                  }
-                  
-                  operationProgress = 100;
-                  setTimeout(() => {
-                    operationInProgress = false;
-                    operationMessage = null;
-                    operationProgress = 0;
-                  }, 300);
-                }, 100);
-                
-                // Continue with the intercepted event
-                return ev;
-              } catch (err) {
-                console.error('Error uploading files:', err);
-                operationInProgress = false;
-                operationMessage = null;
-                operationProgress = 0;
-                alert(`Error uploading files: ${err instanceof Error ? err.message : 'Unknown error'}`);
-                return false; // Prevent the operation in SVAR
-              }
+            console.log('Filemanager API initialized:', api);
+            
+            // Also set up event listeners in init (fallback)
+            api.on('upload', (ev: any) => {
+              console.log('🟡 api.on("upload") event fired:', ev);
+              handleUpload(ev);
             });
+            
+            // Try intercepting upload events - but don't prevent default, let it fire the event
+            api.intercept('upload', (ev: any) => {
+              console.log('🟠 api.intercept("upload") event fired:', ev);
+              // Don't call handleUpload here, let the on:upload handler do it
+              // Just return the event to let it continue
+              return ev;
+            });
+            
+            // Also listen for file-upload event (alternative name)
+            api.on('file-upload', (ev: any) => {
+              console.log('🟣 api.on("file-upload") event fired:', ev);
+              handleUpload(ev);
+            });
+            
+            // Log all events to see what's happening
+            const logAllEvents = (eventName: string) => {
+              api.on(eventName, (ev: any) => {
+                console.log(`📢 Event "${eventName}" fired:`, ev);
+              });
+            };
+            
+            // Monitor common upload-related events
+            ['upload', 'file-upload', 'add-files', 'create-files'].forEach(logAllEvents);
             
             // Intercept copy-files to calculate and use actual destination paths
             api.intercept('copy-files', async (ev: any) => {
