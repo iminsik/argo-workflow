@@ -1,9 +1,19 @@
 <script lang="ts">
-  import { XCircle, Trash2 } from 'lucide-svelte';
+  import { XCircle, Trash2, Play } from 'lucide-svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Badge from '$lib/components/ui/badge.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
   import MonacoEditor from './MonacoEditor.svelte';
+
+  interface Run {
+    id: number;
+    runNumber: number;
+    workflowId: string;
+    phase: string;
+    startedAt: string;
+    finishedAt: string;
+    createdAt: string;
+  }
 
   interface Props {
     task: {
@@ -25,9 +35,16 @@
     onClose: () => void;
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
+    onRerun: (task: { pythonCode: string; dependencies?: string }, taskId: string) => void;
+    onLoadRunLogs?: (taskId: string, runNumber: number) => Promise<void>;
   }
 
-  let { task, activeTab, setActiveTab, taskLogs, loadingLogs, onClose, onCancel, onDelete }: Props = $props();
+  let { task, activeTab, setActiveTab, taskLogs, loadingLogs, onClose, onCancel, onDelete, onRerun, onLoadRunLogs }: Props = $props();
+
+  const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+  let runs = $state<Run[]>([]);
+  let selectedRunNumber = $state<number | null>(null);
+  let loadingRuns = $state(false);
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   let dialogOpen = $state(true);
@@ -52,11 +69,42 @@
     }
   }
 
+  async function fetchTaskDetails() {
+    try {
+      loadingRuns = true;
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${task.id}`);
+      if (res.ok) {
+        const data = await res.json();
+        runs = data.runs || [];
+        // Select latest run by default
+        if (runs.length > 0 && !selectedRunNumber) {
+          selectedRunNumber = runs[0].runNumber;
+          if (onLoadRunLogs && activeTab === 'logs') {
+            await onLoadRunLogs(task.id, selectedRunNumber);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Failed to fetch task details:', error);
+    } finally {
+      loadingRuns = false;
+    }
+  }
+
   $effect(() => {
-    if (!dialogOpen) {
+    if (dialogOpen) {
+      fetchTaskDetails();
+    } else {
       onClose();
     }
   });
+
+  async function handleRunSelect(runNumber: number) {
+    selectedRunNumber = runNumber;
+    if (onLoadRunLogs && activeTab === 'logs') {
+      await onLoadRunLogs(task.id, runNumber);
+    }
+  }
 </script>
 
 <Dialog bind:open={dialogOpen} class="max-w-4xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
@@ -80,6 +128,12 @@
       {/if}
     </div>
     <div class="flex gap-2">
+      <Button
+        onclick={() => onRerun({ pythonCode: task.pythonCode, dependencies: task.dependencies }, task.id)}
+        variant="default"
+      >
+        <Play size={16} class="mr-2" /> Edit & Rerun
+      </Button>
       {#if canCancel}
         <Button
           onclick={() => onCancel(task.id)}
@@ -97,6 +151,35 @@
     </div>
   </div>
   
+  <!-- Run Selector -->
+  {#if runs.length > 0}
+    <div class="mb-4 p-3 bg-gray-50 dark:bg-gray-800 rounded border">
+      <div class="text-sm font-semibold mb-2">Run History ({runs.length} total)</div>
+      <div class="flex gap-2 flex-wrap">
+        {#each runs as run (run.id)}
+          <button
+            onclick={() => handleRunSelect(run.runNumber)}
+            class="px-3 py-1 text-sm border rounded transition-colors {selectedRunNumber === run.runNumber ? 'bg-primary text-primary-foreground border-primary' : 'bg-background hover:bg-muted'}"
+          >
+            Run #{run.runNumber} - {run.phase}
+          </button>
+        {/each}
+      </div>
+      {#if selectedRunNumber}
+        <div class="mt-2 text-xs text-muted-foreground">
+          Viewing Run #{selectedRunNumber} {#if runs.find(r => r.runNumber === selectedRunNumber)}
+            {#if runs.find(r => r.runNumber === selectedRunNumber)?.startedAt}
+              | Started: {new Date(runs.find(r => r.runNumber === selectedRunNumber)!.startedAt).toLocaleString()}
+            {/if}
+            {#if runs.find(r => r.runNumber === selectedRunNumber)?.finishedAt}
+              | Finished: {new Date(runs.find(r => r.runNumber === selectedRunNumber)!.finishedAt).toLocaleString()}
+            {/if}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  {/if}
+
   <!-- Tabs -->
   <div class="flex border-b mb-4">
     <button
@@ -106,7 +189,12 @@
       Code
     </button>
     <button
-      onclick={() => setActiveTab('logs')}
+      onclick={() => {
+        setActiveTab('logs');
+        if (selectedRunNumber && onLoadRunLogs) {
+          onLoadRunLogs(task.id, selectedRunNumber);
+        }
+      }}
       class="px-5 py-2 border-none bg-transparent cursor-pointer border-b-2 transition-colors {activeTab === 'logs' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground'}"
     >
       Logs{#if loadingLogs} ...{/if}
