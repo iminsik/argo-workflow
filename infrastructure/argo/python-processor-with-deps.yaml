@@ -1,0 +1,58 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Workflow
+metadata:
+  generateName: python-job-
+spec:
+  entrypoint: main
+  volumes:
+    - name: task-results
+      persistentVolumeClaim:
+        claimName: task-results-pvc
+  templates:
+    - name: main
+      script:
+        image: python:3.11-slim
+        command: [bash]
+        source: |
+          set -e
+          
+          # Install uv if not present
+          if ! command -v uv &> /dev/null; then
+            pip install --no-cache-dir uv
+          fi
+          
+          # Create isolated virtual environment
+          VENV_DIR="/tmp/venv-{{workflow.name}}"
+          uv venv "$VENV_DIR"
+          
+          # Activate virtual environment
+          source "$VENV_DIR/bin/activate"
+          
+          # Install dependencies if provided
+          if [ -n "$DEPENDENCIES" ] || [ -f "/tmp/requirements.txt" ]; then
+            echo "Installing dependencies..."
+            # Support both requirements.txt format and space-separated packages
+            if [ -f "/tmp/requirements.txt" ]; then
+              echo "Installing from requirements.txt..."
+              uv pip install -r /tmp/requirements.txt
+            elif [ -n "$DEPENDENCIES" ]; then
+              echo "Installing packages: $DEPENDENCIES"
+              # Install packages from DEPENDENCIES env var (space or comma separated)
+              echo "$DEPENDENCIES" | tr ',' ' ' | xargs uv pip install
+            fi
+            echo "Dependencies installed successfully"
+          fi
+          
+          # Execute Python code
+          python -c "$PYTHON_CODE"
+        env:
+          - name: ARGO_WORKFLOW_NAME
+            value: "{{workflow.name}}"
+          - name: PYTHON_CODE
+            value: "print('Processing task in Kind...')"
+          - name: DEPENDENCIES
+            value: ""  # Will be set by API
+        volumeMounts:
+          - name: task-results
+            mountPath: /mnt/results
+
