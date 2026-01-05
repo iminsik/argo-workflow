@@ -315,28 +315,39 @@ def get_logs_from_database(run_id: int, db: Session, task_id: str = None, workfl
         has_task_id = 'task_id' in task_logs_columns
         
         if has_run_id:
-            # New schema: use run_id
+            # New schema: use run_id with ORM
             db_logs = db.query(TaskLog).filter(
                 TaskLog.run_id == run_id
             ).order_by(TaskLog.created_at).all()
+            
+            return [
+                {
+                    "node": log.node_id,
+                    "pod": log.pod_name,
+                    "phase": log.phase,
+                    "logs": log.logs
+                }
+                for log in db_logs
+            ]
         elif has_task_id and task_id:
-            # Old schema: use task_id (fallback)
-            db_logs = db.query(TaskLog).filter(
-                TaskLog.task_id == task_id
-            ).order_by(TaskLog.created_at).all()
+            # Old schema: use task_id with raw SQL (TaskLog model doesn't have task_id attribute)
+            log_rows = db.execute(
+                text("SELECT node_id, pod_name, phase, logs FROM task_logs WHERE task_id = :task_id ORDER BY created_at"),
+                {"task_id": task_id}
+            ).fetchall()
+            
+            return [
+                {
+                    "node": getattr(row, 'node_id', row[0] if len(row) > 0 else ""),
+                    "pod": getattr(row, 'pod_name', row[1] if len(row) > 1 else ""),
+                    "phase": getattr(row, 'phase', row[2] if len(row) > 2 else "Pending"),
+                    "logs": getattr(row, 'logs', row[3] if len(row) > 3 else "")
+                }
+                for row in log_rows
+            ]
         else:
             # No matching schema or missing task_id
             return []
-        
-        return [
-            {
-                "node": log.node_id,
-                "pod": log.pod_name,
-                "phase": log.phase,
-                "logs": log.logs
-            }
-            for log in db_logs
-        ]
     except Exception as e:
         print(f"Error fetching logs from database: {e}")
         return []
