@@ -293,6 +293,25 @@
           }}
           upload={true}
           uploadUrl={`${apiUrl}/api/v1/pv/upload`}
+          previews={(file: any, width?: number, height?: number) => {
+            // Enable previews for image files
+            const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.ico'];
+            const fileId = file.id || file.name || '';
+            const isImage = imageExtensions.some(ext => fileId.toLowerCase().endsWith(ext));
+            
+            if (isImage) {
+              // Return preview URL for images
+              const params = new URLSearchParams({
+                path: fileId
+              });
+              if (width) params.append('width', width.toString());
+              if (height) params.append('height', height.toString());
+              return `${apiUrl}/api/v1/pv/preview?${params.toString()}`;
+            }
+            
+            // Return null for non-image files (no preview)
+            return null;
+          }}
           init={(api) => {
             // Store the API reference for refresh
             fileManagerApi = api;

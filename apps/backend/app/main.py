@@ -2398,6 +2398,159 @@ except (UnicodeDecodeError, UnicodeError):
         raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
 
 
+@app.get("/api/v1/pv/preview")
+async def preview_pv_file(path: str, width: int | None = None, height: int | None = None):
+    """
+    Preview file content from the PV, optimized for images.
+    Returns file content as binary for images, or text for other files.
+    Uses persistent pod for fast execution.
+    """
+    # Validate path
+    if not (path == "/mnt" or path.startswith("/mnt/results")):
+        raise HTTPException(status_code=400, detail="Path must be /mnt or within /mnt/results")
+    
+    # Check if file is an image
+    image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.ico'}
+    is_image = any(path.lower().endswith(ext) for ext in image_extensions)
+    
+    try:
+        # Use persistent pod for fast execution
+        pod = get_persistent_pv_pod()
+        
+        # Escape path for shell command
+        escaped_path = path.replace("'", "'\"'\"'")
+        
+        if is_image:
+            # For images, return binary content directly
+            python_script = f"""
+import os
+import json
+import base64
+
+path = '{escaped_path}'
+
+if not os.path.exists(path):
+    print(json.dumps({{"error": f"File does not exist: {{path}}"}}))
+    exit(1)
+
+if os.path.isdir(path):
+    print(json.dumps({{"error": f"Path is a directory: {{path}}"}}))
+    exit(1)
+
+# Read as binary and encode as base64
+with open(path, "rb") as f:
+    content_bytes = f.read()
+    content_base64 = base64.b64encode(content_bytes).decode("utf-8")
+print(json.dumps({{"content": content_base64, "encoding": "base64", "mime_type": "image"}}))
+"""
+        else:
+            # For non-images, return text or base64
+            python_script = f"""
+import os
+import json
+import base64
+
+path = '{escaped_path}'
+
+if not os.path.exists(path):
+    print(json.dumps({{"error": f"File does not exist: {{path}}"}}))
+    exit(1)
+
+if os.path.isdir(path):
+    print(json.dumps({{"error": f"Path is a directory: {{path}}"}}))
+    exit(1)
+
+# Try to read as text first
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    print(json.dumps({{"content": content, "encoding": "text"}}))
+except (UnicodeDecodeError, UnicodeError):
+    # If text decoding fails, read as binary and encode as base64
+    with open(path, "rb") as f:
+        content_bytes = f.read()
+        content_base64 = base64.b64encode(content_bytes).decode("utf-8")
+    print(json.dumps({{"content": content_base64, "encoding": "base64"}}))
+"""
+        
+        # Execute command - write script to temp file to avoid shell escaping issues
+        import base64
+        script_b64 = base64.b64encode(python_script.encode('utf-8')).decode('utf-8')
+        command = f"echo {script_b64} | base64 -d > /tmp/preview_script.py && python3 /tmp/preview_script.py"
+        output = pod.exec_command(command)
+        
+        # Parse JSON from output
+        try:
+            # Clean up the output
+            output_lines = output.strip().split('\n')
+            json_str = None
+            for line in reversed(output_lines):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    json_str = line
+                    break
+            
+            if not json_str:
+                import re
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', output, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+            
+            if not json_str:
+                raise HTTPException(status_code=500, detail=f"No JSON found in output: {output[:200]}")
+            
+            # Try to parse as JSON first
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                import ast
+                try:
+                    result = ast.literal_eval(json_str)
+                except (ValueError, SyntaxError):
+                    fixed_json = json_str.replace("'", '"')
+                    result = json.loads(fixed_json)
+            
+            if "error" in result:
+                raise HTTPException(status_code=404, detail=result["error"])
+            
+            # For images, return binary content with proper headers
+            if is_image and result.get("encoding") == "base64":
+                import base64
+                image_bytes = base64.b64decode(result["content"])
+                
+                # Determine content type based on extension
+                content_type = "image/png"  # default
+                if path.lower().endswith('.jpg') or path.lower().endswith('.jpeg'):
+                    content_type = "image/jpeg"
+                elif path.lower().endswith('.gif'):
+                    content_type = "image/gif"
+                elif path.lower().endswith('.svg'):
+                    content_type = "image/svg+xml"
+                elif path.lower().endswith('.webp'):
+                    content_type = "image/webp"
+                elif path.lower().endswith('.bmp'):
+                    content_type = "image/bmp"
+                elif path.lower().endswith('.ico'):
+                    content_type = "image/x-icon"
+                
+                from fastapi.responses import Response
+                return Response(content=image_bytes, media_type=content_type)
+            
+            # For non-images, return JSON
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse output: {str(e)}. Output: {output[:500]}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
+
+
 @app.post("/api/v1/pv/copy")
 async def copy_pv_file(source_path: str, destination_path: str):
     """
