@@ -56,6 +56,7 @@
       // Map file items
       const fileItems = items.map((item: any) => ({
         id: item.id, // Full path like "/mnt/results/file.json"
+        name: item.name || item.id.split('/').pop() || item.id, // Filename for display
         size: item.size || 0,
         date: new Date(item.date),
         type: item.type // 'file' or 'folder'
@@ -186,6 +187,7 @@
               const refreshData = await refreshResponse.json();
               const updatedItems = (refreshData.data || []).map((item: any) => ({
                 id: item.id,
+                name: item.name || item.id.split('/').pop() || item.id,
                 size: item.size || 0,
                 date: new Date(item.date),
                 type: item.type
@@ -295,18 +297,49 @@
           uploadUrl={`${apiUrl}/api/v1/pv/upload`}
           previews={(file: any, width?: number, height?: number) => {
             // Enable previews for image files
+            // SVAR calls this for both main preview panel and thumbnails in grid view
             const imageExtensions = ['.jpg', '.jpeg', '.png', '.gif', '.svg', '.webp', '.bmp', '.ico'];
-            const fileId = file.id || file.name || '';
-            const isImage = imageExtensions.some(ext => fileId.toLowerCase().endsWith(ext));
             
-            if (isImage) {
+            // Try to get file path from various possible properties
+            // SVAR passes file.id as the full path for thumbnails
+            let filePath = file.id || file.path || '';
+            
+            // If we only have a name (relative path), try to construct full path from current directory
+            if (!filePath && file.name) {
+              // If name looks like a full path, use it; otherwise construct from currentPath
+              if (file.name.startsWith('/')) {
+                filePath = file.name;
+              } else {
+                filePath = `${currentPath}/${file.name}`;
+              }
+            }
+            
+            // Fallback: try to find the file in our fileData
+            if (!filePath && file.name) {
+              const foundFile = fileData.find((f: any) => f.name === file.name || f.id?.endsWith(file.name));
+              if (foundFile) {
+                filePath = foundFile.id;
+              }
+            }
+            
+            const fileName = file.name || filePath.split('/').pop() || '';
+            
+            // Check if it's an image by extension
+            const isImage = imageExtensions.some(ext => 
+              filePath.toLowerCase().endsWith(ext) || fileName.toLowerCase().endsWith(ext)
+            );
+            
+            if (isImage && filePath) {
               // Return preview URL for images
+              // SVAR will request thumbnails with smaller width/height for grid view
               const params = new URLSearchParams({
-                path: fileId
+                path: filePath
               });
               if (width) params.append('width', width.toString());
               if (height) params.append('height', height.toString());
-              return `${apiUrl}/api/v1/pv/preview?${params.toString()}`;
+              const previewUrl = `${apiUrl}/api/v1/pv/preview?${params.toString()}`;
+              console.log('🖼️ Preview URL generated:', { file, filePath, width, height, previewUrl });
+              return previewUrl;
             }
             
             // Return null for non-image files (no preview)
@@ -528,6 +561,7 @@
                     const refreshData = await refreshResponse.json();
                     const updatedItems = (refreshData.data || []).map((item: any) => ({
                       id: item.id,
+                      name: item.name || item.id.split('/').pop() || item.id,
                       size: item.size || 0,
                       date: new Date(item.date),
                       type: item.type
@@ -619,6 +653,7 @@
                   const data = await response.json();
                   const items = (data.data || []).map((item: any) => ({
                     id: item.id,
+                    name: item.name || item.id.split('/').pop() || item.id,
                     size: item.size || 0,
                     date: new Date(item.date),
                     type: item.type
