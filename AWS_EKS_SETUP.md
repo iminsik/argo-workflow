@@ -153,7 +153,15 @@ sed -i.bak "s/<EFS_FILE_SYSTEM_ID>/$EFS_ID/g" infrastructure/k8s/pv-aws-efs-simp
 
 # Apply the configuration
 kubectl apply -f infrastructure/k8s/pv-aws-efs-simple.yaml
+
+# Verify PVC is bound
+kubectl get pvc -n argo task-results-pvc
 ```
+
+**Important**: The Persistent Volume File Manager feature requires:
+- The PVC `task-results-pvc` to exist in the `argo` namespace
+- The PVC must be bound to a PV with `ReadWriteMany` access mode (EFS supports this)
+- The backend will automatically create a persistent pod that mounts this PVC for file operations
 
 ## Step 5: Set Up RBAC
 
@@ -314,6 +322,18 @@ export KIND_CLUSTER=true
    ```bash
    kubectl describe pv task-results-pv-efs
    kubectl describe pvc task-results-pvc -n argo
+   ```
+
+4. **Verify PVC is bound** (required for Persistent Volume File Manager):
+   ```bash
+   kubectl get pvc -n argo task-results-pvc
+   # Should show STATUS: Bound
+   ```
+
+5. **Check persistent PV pod** (created by backend for file operations):
+   ```bash
+   kubectl get pods -n argo | grep pv-persistent
+   kubectl logs -n argo <pv-persistent-pod-name>
    ```
 
 ### Network Issues
