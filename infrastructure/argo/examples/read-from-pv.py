@@ -9,8 +9,8 @@ if not os.path.exists(results_dir):
     print(f"Error: Results directory {results_dir} does not exist")
     exit(1)
 
-# List all result files
-result_files = [f for f in os.listdir(results_dir) if f.endswith("_result.json")]
+# List all result files (read all JSON files, not just _result.json)
+result_files = [f for f in os.listdir(results_dir) if f.endswith(".json")]
 
 if not result_files:
     print("No result files found in /mnt/results")

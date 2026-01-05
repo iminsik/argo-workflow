@@ -287,15 +287,30 @@
           onOpen={handleFileOpen}
           on:upload={(ev) => {
             console.log('🟢 on:upload event fired:', ev);
+            console.log('🟢 Event detail:', ev.detail);
+            console.log('🟢 Event type:', typeof ev);
             handleUpload(ev);
           }}
           upload={true}
-          uploadUrl={null}
+          uploadUrl={`${apiUrl}/api/v1/pv/upload`}
           init={(api) => {
             // Store the API reference for refresh
             fileManagerApi = api;
             
             console.log('Filemanager API initialized:', api);
+            console.log('🔍 Available API methods:', Object.keys(api));
+            
+            // Check if SVAR has upload-related methods or properties
+            if (typeof api.upload === 'function') {
+              console.log('✅ SVAR has upload() method');
+            }
+            if (typeof api.triggerUpload === 'function') {
+              console.log('✅ SVAR has triggerUpload() method');
+            }
+            
+            // Note: SVAR's built-in upload button doesn't seem to fire events
+            // The manual "Upload Files" button works perfectly, so we'll use that
+            // If SVAR's upload events start firing, they'll be caught by the listeners above
             
             // Also set up event listeners in init (fallback)
             api.on('upload', (ev: any) => {
@@ -303,12 +318,25 @@
               handleUpload(ev);
             });
             
-            // Try intercepting upload events - but don't prevent default, let it fire the event
+            // Try intercepting upload events - handle it ourselves
             api.intercept('upload', (ev: any) => {
               console.log('🟠 api.intercept("upload") event fired:', ev);
-              // Don't call handleUpload here, let the on:upload handler do it
-              // Just return the event to let it continue
-              return ev;
+              console.log('🟠 Intercept event keys:', Object.keys(ev || {}));
+              console.log('🟠 Intercept event detail:', ev.detail);
+              // Handle the upload ourselves
+              handleUpload(ev);
+              // Return false to prevent SVAR's default upload behavior
+              return false;
+            });
+            
+            // Listen for create-files which might be triggered by "Upload file" menu option
+            api.on('create-files', (ev: any) => {
+              console.log('🔵 api.on("create-files") event fired:', ev);
+              // Check if this is actually an upload (has files)
+              if (ev.files || ev.detail?.files) {
+                console.log('🔵 create-files has files, treating as upload');
+                handleUpload(ev);
+              }
             });
             
             // Also listen for file-upload event (alternative name)
@@ -326,6 +354,66 @@
             
             // Monitor common upload-related events
             ['upload', 'file-upload', 'add-files', 'create-files'].forEach(logAllEvents);
+            
+            // Since uploadUrl is provided, SVAR might make direct HTTP requests
+            // Intercept fetch requests to catch SVAR's upload requests
+            const originalFetch = window.fetch;
+            window.fetch = async function(...args) {
+              const [url, options] = args;
+              
+              // Check if this is an upload request
+              if (typeof url === 'string' && url.includes('/api/v1/pv/upload')) {
+                console.log('🌐 Fetch intercepted upload request:', url, options);
+                
+                if (options?.body instanceof FormData) {
+                  // Get current target directory
+                  const currentTarget = currentPath || '/mnt/results';
+                  
+                  // Add path parameter if not present
+                  if (!options.body.has('path')) {
+                    options.body.append('path', currentTarget);
+                    console.log('🌐 Added path parameter to FormData:', currentTarget);
+                  }
+                  
+                  // Show progress
+                  operationInProgress = true;
+                  operationMessage = 'Uploading file...';
+                  operationProgress = 0;
+                  
+                  try {
+                    const response = await originalFetch(url, options);
+                    console.log('🌐 Upload response:', response.status);
+                    
+                    if (response.ok) {
+                      operationProgress = 100;
+                      setTimeout(async () => {
+                        operationInProgress = false;
+                        operationMessage = null;
+                        operationProgress = 0;
+                        // Refresh file list
+                        await fetchFiles(currentTarget);
+                      }, 300);
+                    } else {
+                      const errorData = await response.json().catch(() => ({ detail: 'Unknown error' }));
+                      operationInProgress = false;
+                      operationMessage = null;
+                      operationProgress = 0;
+                      alert(`Upload failed: ${errorData.detail || 'Unknown error'}`);
+                    }
+                    
+                    return response;
+                  } catch (err) {
+                    console.error('🌐 Upload error:', err);
+                    operationInProgress = false;
+                    operationMessage = null;
+                    operationProgress = 0;
+                    throw err;
+                  }
+                }
+              }
+              
+              return originalFetch.apply(this, args);
+            };
             
             // Intercept copy-files to calculate and use actual destination paths
             api.intercept('copy-files', async (ev: any) => {

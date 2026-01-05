@@ -2416,8 +2416,8 @@ async def copy_pv_file(source_path: str, destination_path: str):
         escaped_source = source_path.replace("'", "'\"'\"'")
         escaped_dest = destination_path.replace("'", "'\"'\"'")
         
-        # Execute copy command
-        copy_command = f"cp '{escaped_source}' '{escaped_dest}'"
+        # Execute copy command and set permissions to be readable by all
+        copy_command = f"cp '{escaped_source}' '{escaped_dest}' && chmod 644 '{escaped_dest}'"
         output = pod.exec_command(copy_command)
         
         # Check if copy was successful (cp doesn't output on success, but errors go to stderr)
@@ -2543,6 +2543,9 @@ try:
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
     with open(file_path, 'wb') as f:
         f.write(file_content)
+    
+    # Set permissions to be readable by all (644 = rw-r--r--)
+    os.chmod(file_path, 0o644)
     
     # Clean up temp file
     os.remove(b64_file)
