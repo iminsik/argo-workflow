@@ -46,6 +46,7 @@
   let requirementsFile = $state('');
   let showDependencies = $state(false);
   let submitting = $state(false);
+  let rerunTaskId = $state<string | null>(null);  // Track which task is being rerun
 
   // Reset form when dialog closes
   $effect(() => {
@@ -54,6 +55,7 @@
       dependencies = '';
       requirementsFile = '';
       showDependencies = false;
+      rerunTaskId = null;
     }
   });
 
@@ -484,6 +486,9 @@
       if (requirementsFile.trim()) {
         requestBody.requirementsFile = requirementsFile.trim();
       }
+      if (rerunTaskId) {
+        requestBody.taskId = rerunTaskId;  // Include taskId for rerun
+      }
       
       const res = await fetch(`${apiUrl}/api/v1/tasks/submit`, {
         method: 'POST',
@@ -499,7 +504,11 @@
       }
       
       const data = await res.json();
-      alert('Started Workflow: ' + data.id);
+      if (rerunTaskId) {
+        alert(`Rerun task ${data.id}, run #${data.runNumber}`);
+      } else {
+        alert('Started Workflow: ' + data.id);
+      }
       showSubmitModal = false;
       // pythonCode will be reset by the $effect when showSubmitModal becomes false
       fetchTasks();
@@ -765,6 +774,31 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
       }}
       onCancel={cancelTask}
       onDelete={deleteTask}
+      onRerun={(taskData, taskId) => {
+        rerunTaskId = taskId;
+        pythonCode = taskData.pythonCode || defaultPythonCode;
+        dependencies = taskData.dependencies || '';
+        requirementsFile = ''; // Clear requirements file, user can add it if needed
+        showDependencies = !!taskData.dependencies; // Show dependencies section if there are any
+        showSubmitModal = true;
+      }}
+      onLoadRunLogs={async (taskId: string, runNumber: number) => {
+        try {
+          loadingLogs = true;
+          const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/runs/${runNumber}/logs`);
+          if (res.ok) {
+            const data = await res.json();
+            taskLogs = data.logs || [];
+          } else {
+            taskLogs = [];
+          }
+        } catch (error) {
+          console.error('Failed to fetch run logs:', error);
+          taskLogs = [];
+        } finally {
+          loadingLogs = false;
+        }
+      }}
     />
   {/if}
 
