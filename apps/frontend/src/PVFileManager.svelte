@@ -12,6 +12,7 @@
   let currentPath = $state('/mnt/results');
   let selectedFileContent = $state<string | null>(null);
   let selectedFileName = $state<string | null>(null);
+  let fileManagerApi: any = null;
 
   async function fetchFiles(path: string = '/mnt/results') {
     try {
@@ -29,14 +30,38 @@
       }
 
       const data = await response.json();
+      
       // Transform data to SVAR File Manager format
-      // SVAR expects: { id, size, date (Date object), type }
-      fileData = (data.data || []).map((item: any) => ({
-        id: item.id, // Full path
+      // SVAR File Manager needs parent folders to be explicitly included
+      const items = data.data || [];
+      
+      // Create parent folder structure
+      const parentFolders = [
+        {
+          id: '/mnt',
+          size: 0,
+          date: new Date(),
+          type: 'folder'
+        },
+        {
+          id: '/mnt/results',
+          size: 0,
+          date: new Date(),
+          type: 'folder'
+        }
+      ];
+      
+      // Map file items
+      const fileItems = items.map((item: any) => ({
+        id: item.id, // Full path like "/mnt/results/file.json"
         size: item.size || 0,
         date: new Date(item.date),
         type: item.type // 'file' or 'folder'
       }));
+      
+      // Combine parent folders and files
+      // SVAR will organize them hierarchically
+      fileData = [...parentFolders, ...fileItems];
     } catch (err) {
       error = err instanceof Error ? err.message : 'Unknown error occurred';
       fileData = [];
@@ -144,11 +169,43 @@
       No files or directories found in this location.
     </div>
   {:else if !error}
+    <!-- Debug info (remove after fixing) -->
+    <div class="mb-2 text-xs text-muted-foreground">
+      Debug: {fileData.length} items loaded
+    </div>
     <div class="h-[70vh] border rounded overflow-hidden">
       <Willow>
         <Filemanager 
           data={fileData}
           onOpen={handleFileOpen}
+          init={(api) => {
+            // Store the API reference
+            fileManagerApi = api;
+            
+            // Handle request-data event for dynamic folder loading
+            api.on('request-data', async (ev: any) => {
+              const folderId = ev.id || '/mnt/results';
+              console.log('SVAR requesting data for folder:', folderId);
+              
+              try {
+                const response = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(folderId)}`);
+                if (response.ok) {
+                  const data = await response.json();
+                  const items = (data.data || []).map((item: any) => ({
+                    id: item.id,
+                    size: item.size || 0,
+                    date: new Date(item.date),
+                    type: item.type
+                  }));
+                  
+                  // Provide data to SVAR
+                  api.exec('provide-data', { data: items, id: folderId });
+                }
+              } catch (err) {
+                console.error('Error loading folder data:', err);
+              }
+            });
+          }}
         />
       </Willow>
     </div>
