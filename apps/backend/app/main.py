@@ -85,28 +85,40 @@ except:
         config.load_kube_config()
         print("Loaded Kubernetes config from default location")
     
-    # Apply KinD-specific patches only if explicitly using KinD or auto-detecting localhost
+    # Get the configuration to check the server URL
+    from kubernetes.client import Configuration
+    configuration = Configuration.get_default_copy()
+    
+    # Determine if we should apply KinD patches
+    # Check if explicitly set to kind, or auto-detect by checking if server is localhost
+    is_explicit_kind = KUBERNETES_CLUSTER_TYPE == "kind"
+    is_explicit_kind_flag = os.getenv("KIND_CLUSTER", "").lower() == "true"
+    is_localhost = configuration.host and ('127.0.0.1' in configuration.host or 'localhost' in configuration.host)
+    
     should_patch_kind = (
-        KUBERNETES_CLUSTER_TYPE == "kind" or 
-        (KUBERNETES_CLUSTER_TYPE == "auto" and os.getenv("KIND_CLUSTER", "").lower() == "true")
+        is_explicit_kind or 
+        (KUBERNETES_CLUSTER_TYPE == "auto" and (is_explicit_kind_flag or is_localhost))
     )
     
     if should_patch_kind:
         # Patch configuration for Docker: replace 127.0.0.1 with host.docker.internal
         # and disable SSL verification for development (kind uses self-signed certs)
-        from kubernetes.client import Configuration
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        configuration = Configuration.get_default_copy()
-        if configuration.host and '127.0.0.1' in configuration.host:
+        if configuration.host and ('127.0.0.1' in configuration.host or 'localhost' in configuration.host):
+            # Replace both 127.0.0.1 and localhost with host.docker.internal
             configuration.host = configuration.host.replace('127.0.0.1', 'host.docker.internal')
+            configuration.host = configuration.host.replace('localhost', 'host.docker.internal')
             # Disable SSL verification for development (kind uses self-signed certs)
             configuration.verify_ssl = False
             Configuration.set_default(configuration)
-            print("Applied KinD-specific configuration patches")
+            print("Applied KinD-specific configuration patches (localhost -> host.docker.internal)")
     elif KUBERNETES_CLUSTER_TYPE in ("eks", "external"):
         # For external clusters (EKS, etc.), use standard configuration
         print(f"Using external Kubernetes cluster configuration (type: {KUBERNETES_CLUSTER_TYPE})")
+    else:
+        # Auto mode but not localhost - assume external cluster
+        print(f"Auto-detected cluster type (server: {configuration.host})")
 
 class TaskSubmitRequest(BaseModel):
     pythonCode: str = "print('Processing task in Kind...')"
