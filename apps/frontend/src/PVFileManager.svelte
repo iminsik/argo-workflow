@@ -156,9 +156,100 @@
         <Filemanager 
           data={fileData}
           onOpen={handleFileOpen}
+          uploadUrl={`${apiUrl}/api/v1/pv/upload`}
           init={(api) => {
             // Store the API reference
             fileManagerApi = api;
+            
+            // Intercept upload-files to handle file uploads
+            api.intercept('upload-files', async (ev: any) => {
+              const files = ev.files || [];
+              const target = ev.target || '/mnt/results';
+              
+              if (files.length === 0) {
+                return ev; // Continue with default behavior if no files
+              }
+              
+              try {
+                operationInProgress = true;
+                operationMessage = `Uploading ${files.length} file(s)...`;
+                operationProgress = 0;
+                
+                const uploadedFiles: string[] = [];
+                const totalFiles = files.length;
+                
+                // Determine target directory
+                let targetDir = target;
+                if (target === '/' || target === '') {
+                  targetDir = '/mnt/results';
+                } else if (!target.startsWith('/mnt/results')) {
+                  targetDir = `/mnt/results/${target}`;
+                }
+                
+                // Upload each file
+                for (let i = 0; i < files.length; i++) {
+                  const file = files[i];
+                  operationMessage = `Uploading ${file.name}... (${i + 1}/${totalFiles})`;
+                  operationProgress = Math.round((i / totalFiles) * 90);
+                  
+                  // Create FormData for file upload
+                  const formData = new FormData();
+                  formData.append('file', file);
+                  formData.append('destination_path', targetDir);
+                  formData.append('target', targetDir);
+                  
+                  // Upload file
+                  const uploadResponse = await fetch(`${apiUrl}/api/v1/pv/upload`, {
+                    method: 'POST',
+                    body: formData
+                  });
+                  
+                  if (!uploadResponse.ok) {
+                    const errorData = await uploadResponse.json();
+                    throw new Error(`Failed to upload ${file.name}: ${errorData.detail || 'Unknown error'}`);
+                  }
+                  
+                  const uploadData = await uploadResponse.json();
+                  uploadedFiles.push(uploadData.path);
+                }
+                
+                operationMessage = 'Finalizing...';
+                operationProgress = 95;
+                
+                // Refresh file list
+                setTimeout(async () => {
+                  const refreshResponse = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(targetDir)}`);
+                  if (refreshResponse.ok) {
+                    const refreshData = await refreshResponse.json();
+                    const updatedItems = (refreshData.data || []).map((item: any) => ({
+                      id: item.id,
+                      size: item.size || 0,
+                      date: new Date(item.date),
+                      type: item.type
+                    }));
+                    
+                    api.exec('provide-data', { data: updatedItems, id: targetDir });
+                  }
+                  
+                  operationProgress = 100;
+                  setTimeout(() => {
+                    operationInProgress = false;
+                    operationMessage = null;
+                    operationProgress = 0;
+                  }, 300);
+                }, 100);
+                
+                // Continue with the intercepted event
+                return ev;
+              } catch (err) {
+                console.error('Error uploading files:', err);
+                operationInProgress = false;
+                operationMessage = null;
+                operationProgress = 0;
+                alert(`Error uploading files: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                return false; // Prevent the operation in SVAR
+              }
+            });
             
             // Intercept copy-files to calculate and use actual destination paths
             api.intercept('copy-files', async (ev: any) => {
@@ -298,17 +389,40 @@
               }, 1000);
             });
             
-            // Handle create operation
-            api.on('create-files', async (_ev: any) => {
-              operationInProgress = true;
-              operationMessage = 'Creating file...';
-              operationProgress = 50;
-              // Note: Create API would need to be implemented
-              setTimeout(() => {
+            
+            // Handle create operation (for creating new files/folders)
+            api.on('create-files', async (ev: any) => {
+              // This is for creating new empty files or folders
+              // For now, we'll handle folder creation
+              const items = ev.items || [];
+              const target = ev.target || '/mnt/results';
+              
+              try {
+                operationInProgress = true;
+                operationMessage = `Creating ${items.length} item(s)...`;
+                operationProgress = 0;
+                
+                // Determine target directory
+                let targetDir = target;
+                if (target === '/' || target === '') {
+                  targetDir = '/mnt/results';
+                } else if (!target.startsWith('/mnt/results')) {
+                  targetDir = `/mnt/results/${target}`;
+                }
+                
+                // Note: Create API would need to be implemented in backend
+                // For now, just show progress
+                setTimeout(() => {
+                  operationInProgress = false;
+                  operationMessage = null;
+                  operationProgress = 0;
+                }, 1000);
+              } catch (err) {
+                console.error('Error creating files:', err);
                 operationInProgress = false;
                 operationMessage = null;
                 operationProgress = 0;
-              }, 1000);
+              }
             });
             
             // Handle request-data event for dynamic folder loading

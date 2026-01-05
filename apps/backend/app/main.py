@@ -1,7 +1,7 @@
 import yaml, os, asyncio, json, uuid
 from contextlib import asynccontextmanager
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kubernetes import config  # type: ignore
@@ -2183,8 +2183,9 @@ async def list_pv_files(path: str = "/mnt/results"):
     Uses persistent pod for fast execution.
     """
     # Validate path to prevent directory traversal
-    if not path.startswith("/mnt/results"):
-        raise HTTPException(status_code=400, detail="Path must be within /mnt/results")
+    # Allow /mnt (parent) and /mnt/results (PV mount point) and subdirectories
+    if not (path == "/mnt" or path.startswith("/mnt/results")):
+        raise HTTPException(status_code=400, detail="Path must be /mnt or within /mnt/results")
     
     try:
         # Use persistent pod for fast execution
@@ -2431,3 +2432,115 @@ async def copy_pv_file(source_path: str, destination_path: str):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error copying file: {str(e)}")
+
+
+@app.post("/api/v1/pv/upload")
+async def upload_pv_file(
+    file: UploadFile = File(...),
+    destination_path: str = Form("/mnt/results"),
+    target: str = Form(None)  # Alternative parameter name for SVAR compatibility
+):
+    """
+    Upload a file to the PV.
+    Uses persistent pod for fast execution.
+    """
+    # Use target if provided (SVAR compatibility), otherwise use destination_path
+    dest_path = target if target else destination_path
+    
+    # Validate destination path
+    if not dest_path.startswith("/mnt/results"):
+        # If target is a relative path, make it absolute
+        if not dest_path.startswith("/"):
+            dest_path = f"/mnt/results/{dest_path.lstrip('/')}"
+        else:
+            raise HTTPException(status_code=400, detail="Destination path must be within /mnt/results")
+    
+    try:
+        # Use persistent pod for fast execution
+        pod = get_persistent_pv_pod()
+        
+        # Determine final file path
+        filename = file.filename or "uploaded_file"
+        # Ensure dest_path is a directory (ends with /) or handle it
+        if dest_path.endswith("/"):
+            final_path = f"{dest_path}{filename}"
+        else:
+            # Check if dest_path is a file or directory
+            # For simplicity, assume it's a directory if it doesn't have an extension
+            # or if it's a known directory path
+            final_path = f"{dest_path}/{filename}"
+        
+        # Escape path for shell command
+        escaped_path = final_path.replace("'", "'\"'\"'")
+        
+        # Check if file already exists and handle duplicates
+        check_command = f"test -f '{escaped_path}' && echo 'exists' || echo 'not_exists'"
+        check_output = pod.exec_command(check_command).strip()
+        
+        if check_output == "exists":
+            # File exists, add number suffix
+            base_name = filename.rsplit('.', 1)[0] if '.' in filename else filename
+            extension = '.' + filename.rsplit('.', 1)[1] if '.' in filename else ''
+            counter = 1
+            while True:
+                new_filename = f"{base_name}_{counter}{extension}"
+                new_path = f"{destination_path.rstrip('/')}/{new_filename}"
+                escaped_new_path = new_path.replace("'", "'\"'\"'")
+                check_output = pod.exec_command(f"test -f '{escaped_new_path}' && echo 'exists' || echo 'not_exists'").strip()
+                if check_output != "exists":
+                    final_path = new_path
+                    escaped_path = escaped_new_path
+                    break
+                counter += 1
+        
+        # Read file content
+        file_content = await file.read()
+        
+        # Encode file content as base64 for safe transfer through shell
+        import base64
+        file_content_b64 = base64.b64encode(file_content).decode('utf-8')
+        
+        # Create directory if it doesn't exist
+        dir_path = '/'.join(final_path.split('/')[:-1])
+        escaped_dir = dir_path.replace("'", "'\"'\"'")
+        pod.exec_command(f"mkdir -p '{escaped_dir}'")
+        
+        # Write file using base64 decode in the pod
+        # Use a Python script to write the file to avoid shell escaping issues
+        python_script = f"""
+import base64
+import os
+
+file_path = '{escaped_path}'
+file_content_b64 = '''{file_content_b64}'''
+
+# Decode and write file
+file_content = base64.b64decode(file_content_b64)
+os.makedirs(os.path.dirname(file_path), exist_ok=True)
+with open(file_path, 'wb') as f:
+    f.write(file_content)
+
+print("success")
+"""
+        
+        # Write script to temp file and execute
+        script_b64 = base64.b64encode(python_script.encode('utf-8')).decode('utf-8')
+        upload_command = f"echo {script_b64} | base64 -d > /tmp/upload_script.py && python3 /tmp/upload_script.py"
+        output = pod.exec_command(upload_command)
+        
+        if "success" not in output:
+            raise HTTPException(status_code=500, detail=f"Upload failed: {output}")
+        
+        return {
+            "status": "success",
+            "filename": filename,
+            "path": final_path,
+            "size": len(file_content)
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
