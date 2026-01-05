@@ -1,40 +1,46 @@
 import yaml, os, asyncio, json, uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from kubernetes import config
-from kubernetes.client import CustomObjectsApi, CoreV1Api
-from argo_workflows.model.object_meta import ObjectMeta
-from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgoprojWorkflowV1alpha1Workflow
-from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec
-from argo_workflows.model.io_argoproj_workflow_v1alpha1_template import IoArgoprojWorkflowV1alpha1Template
-from argo_workflows.model.container import Container
+from kubernetes import config  # type: ignore
+from kubernetes.client import CustomObjectsApi, CoreV1Api  # type: ignore
+from argo_workflows.model.object_meta import ObjectMeta  # type: ignore
+from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgoprojWorkflowV1alpha1Workflow  # type: ignore
+from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec  # type: ignore
+from argo_workflows.model.io_argoproj_workflow_v1alpha1_template import IoArgoprojWorkflowV1alpha1Template  # type: ignore
+from argo_workflows.model.container import Container  # type: ignore
 try:
-    from argo_workflows.model.io_argoproj_workflow_v1alpha1_script_template import IoArgoprojWorkflowV1alpha1ScriptTemplate
+    from argo_workflows.model.io_argoproj_workflow_v1alpha1_script_template import IoArgoprojWorkflowV1alpha1ScriptTemplate  # type: ignore
 except ImportError:
     # Fallback if the import path is different
     try:
-        from argo_workflows.model.script_template import ScriptTemplate as IoArgoprojWorkflowV1alpha1ScriptTemplate
+        from argo_workflows.model.script_template import ScriptTemplate as IoArgoprojWorkflowV1alpha1ScriptTemplate  # type: ignore
     except ImportError:
         IoArgoprojWorkflowV1alpha1ScriptTemplate = None
 from sqlalchemy.orm import Session
-from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal
+from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal  # type: ignore
 try:
-    from argo_workflows.model.volume_mount import VolumeMount
+    from argo_workflows.model.volume_mount import VolumeMount  # type: ignore
 except ImportError:
     VolumeMount = None
 
-app = FastAPI()
 
-# Initialize database on startup
-@app.on_event("startup")
-async def startup_event():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
     try:
         init_db()
         print("Database initialized successfully")
     except Exception as e:
         print(f"Warning: Could not initialize database: {e}. Logs will not be persisted.")
+    yield
+    # Shutdown (if needed in the future)
+    pass
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Configure CORS
 cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:5173,http://localhost:3000").split(",")
@@ -69,7 +75,7 @@ class TaskSubmitRequest(BaseModel):
     taskId: str | None = None  # Optional: task ID for rerun (creates new run of existing task)
 
 
-def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
+def fetch_logs_from_kubernetes(task_id: str, namespace: str | None = None) -> list:
     """
     Fetch logs directly from Kubernetes pods.
     Returns a list of log entries with structure: {node, pod, phase, logs}
@@ -219,7 +225,7 @@ def fetch_logs_from_kubernetes(task_id: str, namespace: str = None) -> list:
         raise Exception(f"Error fetching logs from Kubernetes: {str(e)}")
 
 
-def save_logs_to_database(run_id: int, logs: list, db: Session, task_id: str = None, workflow_id: str = None):
+def save_logs_to_database(run_id: int, logs: list, db: Session, task_id: str | None = None, workflow_id: str | None = None):
     """
     Save logs to database for a specific run. Updates existing entries or creates new ones.
     Handles both old schema (task_id) and new schema (run_id).
@@ -351,7 +357,7 @@ def save_logs_to_database(run_id: int, logs: list, db: Session, task_id: str = N
         # Don't raise - allow logs to still be returned from Kubernetes
 
 
-def get_logs_from_database(run_id: int, db: Session, task_id: str = None, workflow_id: str = None) -> list:
+def get_logs_from_database(run_id: int, db: Session, task_id: str | None = None, workflow_id: str | None = None) -> list:
     """
     Fetch logs from database for a given run.
     Handles both old schema (task_id) and new schema (run_id).
@@ -757,7 +763,7 @@ REQ_EOF
         
         # If using dict approach for script templates, build workflow dict directly
         if use_dict_approach:
-            from argo_workflows.api_client import ApiClient
+            from argo_workflows.api_client import ApiClient  # type: ignore
             api_client = ApiClient()
             workflow_dict = {
                 "apiVersion": manifest_dict.get("apiVersion"),
@@ -1380,7 +1386,7 @@ async def get_run_logs(task_id: str, run_number: int, db: Session = Depends(get_
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/tasks/{task_id}/logs")
-async def get_task_logs(task_id: str, run_number: int = None, db: Session = Depends(get_db)):
+async def get_task_logs(task_id: str, run_number: int | None = None, db: Session = Depends(get_db)):
     """
     Get logs for a task. If run_number is provided, get logs for that specific run.
     Otherwise, get logs for the latest run.
@@ -1885,11 +1891,11 @@ async def delete_task(task_id: str, db: Session = Depends(get_db)):
                 for run in runs:
                     run_id = run.id if has_python_code else (getattr(run, 'id', run[0]) if len(run) > 0 else None)
                     if run_id:
-                        log_count = db.execute(text("DELETE FROM task_logs WHERE run_id = :run_id"), {"run_id": run_id}).rowcount
+                        log_count = db.execute(text("DELETE FROM task_logs WHERE run_id = :run_id"), {"run_id": run_id}).rowcount  # type: ignore
                         deleted_logs += log_count
             elif has_task_id:
                 # Old schema: delete logs via task_id
-                deleted_logs = db.execute(text("DELETE FROM task_logs WHERE task_id = :task_id"), {"task_id": task_id}).rowcount
+                deleted_logs = db.execute(text("DELETE FROM task_logs WHERE task_id = :task_id"), {"task_id": task_id}).rowcount  # type: ignore
             # If neither exists, logs table might be empty or in unexpected state
             
             # Delete runs manually (to avoid ORM cascade loading relationships)
