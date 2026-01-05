@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from kubernetes import config  # type: ignore
 from kubernetes.client import CustomObjectsApi, CoreV1Api  # type: ignore
+from kubernetes.stream import stream  # type: ignore
 from argo_workflows.model.object_meta import ObjectMeta  # type: ignore
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow import IoArgoprojWorkflowV1alpha1Workflow  # type: ignore
 from argo_workflows.model.io_argoproj_workflow_v1alpha1_workflow_spec import IoArgoprojWorkflowV1alpha1WorkflowSpec  # type: ignore
@@ -35,9 +36,24 @@ async def lifespan(app: FastAPI):
         print("Database initialized successfully")
     except Exception as e:
         print(f"Warning: Could not initialize database: {e}. Logs will not be persisted.")
+    
+    # Initialize persistent PV pod for fast file operations
+    try:
+        pod = get_persistent_pv_pod()
+        pod.create_pod()
+        print("Persistent PV pod initialized successfully")
+    except Exception as e:
+        print(f"Warning: Could not initialize persistent PV pod: {e}. File operations will be slower.")
+    
     yield
-    # Shutdown (if needed in the future)
-    pass
+    
+    # Shutdown
+    global _persistent_pv_pod
+    if _persistent_pv_pod:
+        try:
+            _persistent_pv_pod.cleanup()
+        except Exception as e:
+            print(f"Error cleaning up persistent PV pod: {e}")
 
 
 app = FastAPI(lifespan=lifespan)
@@ -73,6 +89,190 @@ class TaskSubmitRequest(BaseModel):
     dependencies: str | None = None  # Space or comma-separated package names
     requirementsFile: str | None = None  # requirements.txt content
     taskId: str | None = None  # Optional: task ID for rerun (creates new run of existing task)
+
+
+# Persistent Pod Manager for PV file operations
+class PersistentPVPod:
+    """Manages a persistent pod for fast PV file operations."""
+    
+    def __init__(self):
+        self.pod_name = f"pv-persistent-{uuid.uuid4().hex[:8]}"
+        self.namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        self.core_api = None
+        self._pod_ready = False
+        
+    def initialize(self):
+        """Initialize Kubernetes API client."""
+        self.core_api = CoreV1Api()
+        
+    def create_pod(self):
+        """Create the persistent pod."""
+        if not self.core_api:
+            self.initialize()
+            
+        try:
+            # Check if pod already exists
+            try:
+                existing = self.core_api.read_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+                if existing.status.phase in ["Running", "Pending"]:
+                    print(f"Persistent PV pod {self.pod_name} already exists")
+                    self._pod_ready = True
+                    return
+            except Exception:
+                pass  # Pod doesn't exist, create it
+            
+            # Create persistent pod that stays running
+            pod_manifest = {
+                "apiVersion": "v1",
+                "kind": "Pod",
+                "metadata": {
+                    "name": self.pod_name,
+                    "namespace": self.namespace,
+                },
+                "spec": {
+                    "restartPolicy": "Always",  # Keep pod running
+                    "containers": [
+                        {
+                            "name": "pv-accessor",
+                            "image": "python:3.11-slim",
+                            "command": ["sleep", "infinity"],  # Keep container running
+                            "volumeMounts": [
+                                {
+                                    "name": "task-results",
+                                    "mountPath": "/mnt/results"
+                                }
+                            ]
+                        }
+                    ],
+                    "volumes": [
+                        {
+                            "name": "task-results",
+                            "persistentVolumeClaim": {
+                                "claimName": "task-results-pvc"
+                            }
+                        }
+                    ]
+                }
+            }
+            
+            self.core_api.create_namespaced_pod(namespace=self.namespace, body=pod_manifest)
+            print(f"Created persistent PV pod: {self.pod_name}")
+            
+            # Wait for pod to be ready
+            import time
+            max_wait = 60
+            waited = 0
+            while waited < max_wait:
+                try:
+                    pod = self.core_api.read_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+                    if pod.status.phase == "Running":
+                        # Check if container is ready
+                        if pod.status.container_statuses:
+                            if pod.status.container_statuses[0].ready:
+                                self._pod_ready = True
+                                print(f"Persistent PV pod {self.pod_name} is ready")
+                                return
+                except Exception as e:
+                    pass
+                time.sleep(1)
+                waited += 1
+            
+            raise Exception(f"Pod {self.pod_name} did not become ready in time")
+            
+        except Exception as e:
+            print(f"Error creating persistent PV pod: {e}")
+            self._pod_ready = False
+            raise
+    
+    def ensure_ready(self):
+        """Ensure pod is ready, recreate if needed."""
+        if not self._pod_ready or not self.core_api:
+            self.create_pod()
+            return
+        
+        # Check if pod is still running
+        try:
+            pod = self.core_api.read_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+            if pod.status.phase != "Running" or not (pod.status.container_statuses and pod.status.container_statuses[0].ready):
+                print(f"Persistent PV pod {self.pod_name} is not ready, recreating...")
+                self._pod_ready = False
+                try:
+                    self.core_api.delete_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+                except:
+                    pass
+                self.create_pod()
+        except Exception as e:
+            print(f"Error checking pod status: {e}, recreating...")
+            self._pod_ready = False
+            try:
+                self.core_api.delete_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+            except:
+                pass
+            self.create_pod()
+    
+    def exec_command(self, command: str) -> str:
+        """Execute a command in the persistent pod and return output."""
+        self.ensure_ready()
+        
+        try:
+            # Execute command using stream API
+            resp = stream(
+                self.core_api.connect_get_namespaced_pod_exec,
+                self.pod_name,
+                self.namespace,
+                command=["sh", "-c", command],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False
+            )
+            # Stream API returns string directly
+            return resp if isinstance(resp, str) else resp.decode('utf-8') if isinstance(resp, bytes) else str(resp)
+        except Exception as e:
+            # If exec fails, pod might be dead, try to recreate
+            print(f"Error executing command in pod: {e}, attempting to recreate pod...")
+            self._pod_ready = False
+            try:
+                self.core_api.delete_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+            except:
+                pass
+            self.create_pod()
+            # Retry once
+            resp = stream(
+                self.core_api.connect_get_namespaced_pod_exec,
+                self.pod_name,
+                self.namespace,
+                command=["sh", "-c", command],
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False
+            )
+            return resp if isinstance(resp, str) else resp.decode('utf-8') if isinstance(resp, bytes) else str(resp)
+    
+    def cleanup(self):
+        """Clean up the persistent pod."""
+        if not self.core_api:
+            return
+            
+        try:
+            self.core_api.delete_namespaced_pod(name=self.pod_name, namespace=self.namespace)
+            print(f"Cleaned up persistent PV pod: {self.pod_name}")
+        except Exception as e:
+            print(f"Error cleaning up persistent PV pod: {e}")
+
+
+# Global persistent pod instance
+_persistent_pv_pod: PersistentPVPod | None = None
+
+
+def get_persistent_pv_pod() -> PersistentPVPod:
+    """Get or create the persistent PV pod."""
+    global _persistent_pv_pod
+    if _persistent_pv_pod is None:
+        _persistent_pv_pod = PersistentPVPod()
+        _persistent_pv_pod.initialize()
+    return _persistent_pv_pod
 
 
 def fetch_logs_from_kubernetes(task_id: str, namespace: str | None = None) -> list:
@@ -1944,40 +2144,27 @@ async def list_pv_files(path: str = "/mnt/results"):
     """
     List files and directories in the PV.
     Returns data in format compatible with SVAR Svelte File Manager.
+    Uses persistent pod for fast execution.
     """
-    namespace = os.getenv("ARGO_NAMESPACE", "argo")
-    core_api = CoreV1Api()
-    
     # Validate path to prevent directory traversal
     if not path.startswith("/mnt/results"):
         raise HTTPException(status_code=400, detail="Path must be within /mnt/results")
     
-    pod_name = f"pv-reader-{uuid.uuid4().hex[:8]}"
-    
     try:
-        # Create a temporary pod to access the PV
-        pod_manifest = {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": pod_name,
-                "namespace": namespace,
-            },
-            "spec": {
-                "restartPolicy": "Never",
-                "containers": [
-                    {
-                        "name": "reader",
-                        "image": "python:3.11-slim",
-                        "command": ["python", "-c"],
-                        "args": [
-                            f"""
+        # Use persistent pod for fast execution
+        pod = get_persistent_pv_pod()
+        
+        # Escape path for shell command
+        escaped_path = path.replace("'", "'\"'\"'")
+        
+        # Execute Python script in persistent pod
+        python_script = f"""
 import os
 import json
 import stat
 from datetime import datetime
 
-path = "{path}"
+path = '{escaped_path}'
 
 if not os.path.exists(path):
     print(json.dumps({{"error": f"Path does not exist: {{path}}"}}))
@@ -2011,58 +2198,20 @@ for item in sorted(os.listdir(path)):
 
 print(json.dumps({{"items": items}}))
 """
-                        ],
-                        "volumeMounts": [
-                            {
-                                "name": "task-results",
-                                "mountPath": "/mnt/results"
-                            }
-                        ]
-                    }
-                ],
-                "volumes": [
-                    {
-                        "name": "task-results",
-                        "persistentVolumeClaim": {
-                            "claimName": "task-results-pvc"
-                        }
-                    }
-                ]
-            }
-        }
         
-        # Create the pod
-        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        # Execute command - write script to temp file to avoid shell escaping issues
+        import base64
+        script_b64 = base64.b64encode(python_script.encode('utf-8')).decode('utf-8')
+        command = f"echo {script_b64} | base64 -d > /tmp/script.py && python3 /tmp/script.py"
+        output = pod.exec_command(command)
         
-        # Wait for pod to be ready
-        import time
-        max_wait = 30
-        waited = 0
-        while waited < max_wait:
-            try:
-                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
-                if pod.status.phase == "Succeeded":
-                    break
-                elif pod.status.phase == "Failed":
-                    raise HTTPException(status_code=500, detail="Pod failed to execute")
-            except Exception:
-                pass
-            time.sleep(1)
-            waited += 1
-        
-        if waited >= max_wait:
-            raise HTTPException(status_code=500, detail="Pod did not complete in time")
-        
-        # Get logs from the pod
-        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="reader")
-        
-        # Parse JSON from logs
+        # Parse JSON from output
         try:
-            # Clean up the logs - remove any leading/trailing whitespace
-            log_lines = logs.strip().split('\n')
+            # Clean up the output - remove any leading/trailing whitespace
+            output_lines = output.strip().split('\n')
             # Find the JSON line (should be the last line or the one with {})
             json_str = None
-            for line in reversed(log_lines):
+            for line in reversed(output_lines):
                 line = line.strip()
                 if line.startswith('{') and line.endswith('}'):
                     json_str = line
@@ -2071,19 +2220,18 @@ print(json.dumps({{"items": items}}))
             if not json_str:
                 # Try to extract JSON from the entire output
                 import re
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', output, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
             
             if not json_str:
-                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
+                raise HTTPException(status_code=500, detail=f"No JSON found in output: {output[:200]}")
             
             # Try to parse as JSON first
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError:
                 # If JSON parsing fails, try to parse as Python dict (handle single quotes)
-                # Replace single quotes with double quotes, but be careful with escaped quotes
                 import ast
                 try:
                     # Use ast.literal_eval to safely parse Python dict syntax
@@ -2102,7 +2250,7 @@ print(json.dumps({{"items": items}}))
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+            raise HTTPException(status_code=500, detail=f"Failed to parse output: {str(e)}. Output: {output[:500]}")
     
     except HTTPException:
         raise
@@ -2110,12 +2258,6 @@ print(json.dumps({{"items": items}}))
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error accessing PV: {str(e)}")
-    finally:
-        # Clean up the pod
-        try:
-            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
-        except Exception:
-            pass  # Ignore cleanup errors
 
 
 @app.get("/api/v1/pv/file")
@@ -2123,39 +2265,26 @@ async def read_pv_file(path: str):
     """
     Read file content from the PV.
     Returns file content as text or base64 for binary files.
+    Uses persistent pod for fast execution.
     """
-    namespace = os.getenv("ARGO_NAMESPACE", "argo")
-    core_api = CoreV1Api()
-    
     # Validate path
     if not path.startswith("/mnt/results"):
         raise HTTPException(status_code=400, detail="Path must be within /mnt/results")
     
-    pod_name = f"pv-reader-{uuid.uuid4().hex[:8]}"
-    
     try:
-        # Create a temporary pod to read the file
-        pod_manifest = {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": pod_name,
-                "namespace": namespace,
-            },
-            "spec": {
-                "restartPolicy": "Never",
-                "containers": [
-                    {
-                        "name": "reader",
-                        "image": "python:3.11-slim",
-                        "command": ["python", "-c"],
-                        "args": [
-                            f"""
+        # Use persistent pod for fast execution
+        pod = get_persistent_pv_pod()
+        
+        # Escape path for shell command
+        escaped_path = path.replace("'", "'\"'\"'")
+        
+        # Execute Python script in persistent pod
+        python_script = f"""
 import os
 import json
 import base64
 
-path = "{path}"
+path = '{escaped_path}'
 
 if not os.path.exists(path):
     print(json.dumps({{"error": f"File does not exist: {{path}}"}}))
@@ -2170,95 +2299,48 @@ try:
     with open(path, "r", encoding="utf-8") as f:
         content = f.read()
     print(json.dumps({{"content": content, "encoding": "text"}}))
-except UnicodeDecodeError:
-    # If text fails, read as binary and encode as base64
+except (UnicodeDecodeError, UnicodeError):
+    # If text decoding fails, read as binary and encode as base64
     with open(path, "rb") as f:
         content_bytes = f.read()
-    content_b64 = base64.b64encode(content_bytes).decode("utf-8")
-    print(json.dumps({{"content": content_b64, "encoding": "base64"}}))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
-    exit(1)
+        content_base64 = base64.b64encode(content_bytes).decode("utf-8")
+    print(json.dumps({{"content": content_base64, "encoding": "base64"}}))
 """
-                        ],
-                        "volumeMounts": [
-                            {
-                                "name": "task-results",
-                                "mountPath": "/mnt/results"
-                            }
-                        ]
-                    }
-                ],
-                "volumes": [
-                    {
-                        "name": "task-results",
-                        "persistentVolumeClaim": {
-                            "claimName": "task-results-pvc"
-                        }
-                    }
-                ]
-            }
-        }
         
-        # Create the pod
-        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        # Execute command - write script to temp file to avoid shell escaping issues
+        import base64
+        script_b64 = base64.b64encode(python_script.encode('utf-8')).decode('utf-8')
+        command = f"echo {script_b64} | base64 -d > /tmp/script.py && python3 /tmp/script.py"
+        output = pod.exec_command(command)
         
-        # Wait for pod to be ready
-        import time
-        max_wait = 30
-        waited = 0
-        while waited < max_wait:
-            try:
-                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
-                if pod.status.phase == "Succeeded":
-                    break
-                elif pod.status.phase == "Failed":
-                    raise HTTPException(status_code=500, detail="Pod failed to execute")
-            except Exception:
-                pass
-            time.sleep(1)
-            waited += 1
-        
-        if waited >= max_wait:
-            raise HTTPException(status_code=500, detail="Pod did not complete in time")
-        
-        # Get logs from the pod
-        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="reader")
-        
-        # Parse JSON from logs
+        # Parse JSON from output
         try:
-            # Clean up the logs - remove any leading/trailing whitespace
-            log_lines = logs.strip().split('\n')
-            # Find the JSON line (should be the last line or the one with {})
+            # Clean up the output
+            output_lines = output.strip().split('\n')
             json_str = None
-            for line in reversed(log_lines):
+            for line in reversed(output_lines):
                 line = line.strip()
                 if line.startswith('{') and line.endswith('}'):
                     json_str = line
                     break
             
             if not json_str:
-                # Try to extract JSON from the entire output
                 import re
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', output, re.DOTALL)
                 if json_match:
                     json_str = json_match.group(0)
             
             if not json_str:
-                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
+                raise HTTPException(status_code=500, detail=f"No JSON found in output: {output[:200]}")
             
             # Try to parse as JSON first
             try:
                 result = json.loads(json_str)
             except json.JSONDecodeError:
-                # If JSON parsing fails, try to parse as Python dict (handle single quotes)
                 import ast
                 try:
-                    # Use ast.literal_eval to safely parse Python dict syntax
                     result = ast.literal_eval(json_str)
                 except (ValueError, SyntaxError):
-                    # Last resort: try to fix common issues
-                    # Replace single quotes with double quotes (simple approach)
                     fixed_json = json_str.replace("'", '"')
                     result = json.loads(fixed_json)
             
@@ -2269,7 +2351,7 @@ except Exception as e:
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+            raise HTTPException(status_code=500, detail=f"Failed to parse output: {str(e)}. Output: {output[:500]}")
     
     except HTTPException:
         raise
@@ -2277,158 +2359,35 @@ except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
-    finally:
-        # Clean up the pod
-        try:
-            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
-        except Exception:
-            pass  # Ignore cleanup errors
 
 
 @app.post("/api/v1/pv/copy")
 async def copy_pv_file(source_path: str, destination_path: str):
     """
-    Copy a file or directory in the PV.
+    Copy a file within the PV.
+    Uses persistent pod for fast execution.
     """
-    namespace = os.getenv("ARGO_NAMESPACE", "argo")
-    core_api = CoreV1Api()
-    
     # Validate paths
     if not source_path.startswith("/mnt/results") or not destination_path.startswith("/mnt/results"):
         raise HTTPException(status_code=400, detail="Paths must be within /mnt/results")
     
-    pod_name = f"pv-copy-{uuid.uuid4().hex[:8]}"
-    
     try:
-        # Create a temporary pod to copy the file
-        pod_manifest = {
-            "apiVersion": "v1",
-            "kind": "Pod",
-            "metadata": {
-                "name": pod_name,
-                "namespace": namespace,
-            },
-            "spec": {
-                "restartPolicy": "Never",
-                "containers": [
-                    {
-                        "name": "copier",
-                        "image": "python:3.11-slim",
-                        "command": ["python", "-c"],
-                        "args": [
-                            f"""
-import os
-import json
-import shutil
-
-source = "{source_path}"
-destination = "{destination_path}"
-
-if not os.path.exists(source):
-    print(json.dumps({{"error": f"Source does not exist: {{source}}"}}))
-    exit(1)
-
-# Check if destination already exists
-if os.path.exists(destination):
-    print(json.dumps({{"error": f"Destination already exists: {{destination}}"}}))
-    exit(1)
-
-try:
-    if os.path.isdir(source):
-        shutil.copytree(source, destination)
-    else:
-        # Ensure destination directory exists
-        dest_dir = os.path.dirname(destination)
-        os.makedirs(dest_dir, exist_ok=True)
-        shutil.copy2(source, destination)
-    
-    print(json.dumps({{"success": True, "message": f"Copied {{source}} to {{destination}}"}}))
-except Exception as e:
-    print(json.dumps({{"error": str(e)}}))
-    exit(1)
-"""
-                        ],
-                        "volumeMounts": [
-                            {
-                                "name": "task-results",
-                                "mountPath": "/mnt/results"
-                            }
-                        ]
-                    }
-                ],
-                "volumes": [
-                    {
-                        "name": "task-results",
-                        "persistentVolumeClaim": {
-                            "claimName": "task-results-pvc"
-                        }
-                    }
-                ]
-            }
-        }
+        # Use persistent pod for fast execution
+        pod = get_persistent_pv_pod()
         
-        # Create the pod
-        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        # Escape paths for shell command
+        escaped_source = source_path.replace("'", "'\"'\"'")
+        escaped_dest = destination_path.replace("'", "'\"'\"'")
         
-        # Wait for pod to complete
-        import time
-        max_wait = 30
-        waited = 0
-        while waited < max_wait:
-            try:
-                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
-                if pod.status.phase == "Succeeded":
-                    break
-                elif pod.status.phase == "Failed":
-                    raise HTTPException(status_code=500, detail="Pod failed to execute")
-            except Exception:
-                pass
-            time.sleep(1)
-            waited += 1
+        # Execute copy command
+        copy_command = f"cp '{escaped_source}' '{escaped_dest}'"
+        output = pod.exec_command(copy_command)
         
-        if waited >= max_wait:
-            raise HTTPException(status_code=500, detail="Pod did not complete in time")
+        # Check if copy was successful (cp doesn't output on success, but errors go to stderr)
+        if output and "error" in output.lower():
+            raise HTTPException(status_code=500, detail=f"Copy failed: {output}")
         
-        # Get logs from the pod
-        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="copier")
-        
-        # Parse JSON from logs (same logic as read_pv_file)
-        try:
-            log_lines = logs.strip().split('\n')
-            json_str = None
-            for line in reversed(log_lines):
-                line = line.strip()
-                if line.startswith('{') and line.endswith('}'):
-                    json_str = line
-                    break
-            
-            if not json_str:
-                import re
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
-                if json_match:
-                    json_str = json_match.group(0)
-            
-            if not json_str:
-                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
-            
-            try:
-                result = json.loads(json_str)
-            except json.JSONDecodeError:
-                import ast
-                try:
-                    result = ast.literal_eval(json_str)
-                except (ValueError, SyntaxError):
-                    fixed_json = json_str.replace("'", '"')
-                    result = json.loads(fixed_json)
-            
-            if "error" in result:
-                raise HTTPException(status_code=400, detail=result["error"])
-            
-            return result
-        except HTTPException:
-            raise
-        except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+        return {"status": "success", "source": source_path, "destination": destination_path}
     
     except HTTPException:
         raise
@@ -2436,9 +2395,3 @@ except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error copying file: {str(e)}")
-    finally:
-        # Clean up the pod
-        try:
-            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
-        except Exception:
-            pass  # Ignore cleanup errors
