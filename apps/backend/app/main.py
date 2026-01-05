@@ -2283,3 +2283,162 @@ except Exception as e:
             core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
         except Exception:
             pass  # Ignore cleanup errors
+
+
+@app.post("/api/v1/pv/copy")
+async def copy_pv_file(source_path: str, destination_path: str):
+    """
+    Copy a file or directory in the PV.
+    """
+    namespace = os.getenv("ARGO_NAMESPACE", "argo")
+    core_api = CoreV1Api()
+    
+    # Validate paths
+    if not source_path.startswith("/mnt/results") or not destination_path.startswith("/mnt/results"):
+        raise HTTPException(status_code=400, detail="Paths must be within /mnt/results")
+    
+    pod_name = f"pv-copy-{uuid.uuid4().hex[:8]}"
+    
+    try:
+        # Create a temporary pod to copy the file
+        pod_manifest = {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {
+                "name": pod_name,
+                "namespace": namespace,
+            },
+            "spec": {
+                "restartPolicy": "Never",
+                "containers": [
+                    {
+                        "name": "copier",
+                        "image": "python:3.11-slim",
+                        "command": ["python", "-c"],
+                        "args": [
+                            f"""
+import os
+import json
+import shutil
+
+source = "{source_path}"
+destination = "{destination_path}"
+
+if not os.path.exists(source):
+    print(json.dumps({{"error": f"Source does not exist: {{source}}"}}))
+    exit(1)
+
+# Check if destination already exists
+if os.path.exists(destination):
+    print(json.dumps({{"error": f"Destination already exists: {{destination}}"}}))
+    exit(1)
+
+try:
+    if os.path.isdir(source):
+        shutil.copytree(source, destination)
+    else:
+        # Ensure destination directory exists
+        dest_dir = os.path.dirname(destination)
+        os.makedirs(dest_dir, exist_ok=True)
+        shutil.copy2(source, destination)
+    
+    print(json.dumps({{"success": True, "message": f"Copied {{source}} to {{destination}}"}}))
+except Exception as e:
+    print(json.dumps({{"error": str(e)}}))
+    exit(1)
+"""
+                        ],
+                        "volumeMounts": [
+                            {
+                                "name": "task-results",
+                                "mountPath": "/mnt/results"
+                            }
+                        ]
+                    }
+                ],
+                "volumes": [
+                    {
+                        "name": "task-results",
+                        "persistentVolumeClaim": {
+                            "claimName": "task-results-pvc"
+                        }
+                    }
+                ]
+            }
+        }
+        
+        # Create the pod
+        core_api.create_namespaced_pod(namespace=namespace, body=pod_manifest)
+        
+        # Wait for pod to complete
+        import time
+        max_wait = 30
+        waited = 0
+        while waited < max_wait:
+            try:
+                pod = core_api.read_namespaced_pod(name=pod_name, namespace=namespace)
+                if pod.status.phase == "Succeeded":
+                    break
+                elif pod.status.phase == "Failed":
+                    raise HTTPException(status_code=500, detail="Pod failed to execute")
+            except Exception:
+                pass
+            time.sleep(1)
+            waited += 1
+        
+        if waited >= max_wait:
+            raise HTTPException(status_code=500, detail="Pod did not complete in time")
+        
+        # Get logs from the pod
+        logs = core_api.read_namespaced_pod_log(name=pod_name, namespace=namespace, container="copier")
+        
+        # Parse JSON from logs (same logic as read_pv_file)
+        try:
+            log_lines = logs.strip().split('\n')
+            json_str = None
+            for line in reversed(log_lines):
+                line = line.strip()
+                if line.startswith('{') and line.endswith('}'):
+                    json_str = line
+                    break
+            
+            if not json_str:
+                import re
+                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', logs, re.DOTALL)
+                if json_match:
+                    json_str = json_match.group(0)
+            
+            if not json_str:
+                raise HTTPException(status_code=500, detail=f"No JSON found in pod output: {logs[:200]}")
+            
+            try:
+                result = json.loads(json_str)
+            except json.JSONDecodeError:
+                import ast
+                try:
+                    result = ast.literal_eval(json_str)
+                except (ValueError, SyntaxError):
+                    fixed_json = json_str.replace("'", '"')
+                    result = json.loads(fixed_json)
+            
+            if "error" in result:
+                raise HTTPException(status_code=400, detail=result["error"])
+            
+            return result
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to parse pod output: {str(e)}. Output: {logs[:500]}")
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Error copying file: {str(e)}")
+    finally:
+        # Clean up the pod
+        try:
+            core_api.delete_namespaced_pod(name=pod_name, namespace=namespace)
+        except Exception:
+            pass  # Ignore cleanup errors

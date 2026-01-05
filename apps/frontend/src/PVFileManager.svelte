@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { Filemanager, Willow } from '@svar-ui/svelte-filemanager';
   import Button from '$lib/components/ui/button.svelte';
-  import { RefreshCw } from 'lucide-svelte';
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -106,17 +105,6 @@
     }
   }
 
-  function navigateToParent() {
-    if (currentPath === '/mnt/results') {
-      return; // Already at root
-    }
-    const parentPath = currentPath.split('/').slice(0, -1).join('/') || '/mnt/results';
-    fetchFiles(parentPath);
-  }
-
-  function navigateToRoot() {
-    fetchFiles('/mnt/results');
-  }
 
   onMount(() => {
     fetchFiles();
@@ -124,35 +112,6 @@
 </script>
 
 <div class="container mx-auto p-4">
-  <div class="flex justify-end items-center mb-4">
-    <Button onclick={() => fetchFiles(currentPath)} disabled={loading} variant="outline">
-      <RefreshCw size={16} class="mr-2" /> Refresh
-    </Button>
-  </div>
-
-  <div class="mb-4">
-    <div class="flex items-center gap-2 text-sm text-muted-foreground">
-      <button 
-        onclick={navigateToRoot}
-        class="hover:text-foreground underline"
-        disabled={currentPath === '/mnt/results'}
-      >
-        /mnt/results
-      </button>
-      {#if currentPath !== '/mnt/results'}
-        <span>/</span>
-        <button 
-          onclick={navigateToParent}
-          class="hover:text-foreground underline"
-        >
-          ..
-        </button>
-      {/if}
-    </div>
-    <div class="text-sm text-muted-foreground mt-1">
-      Current path: <code class="bg-muted px-1 rounded">{currentPath}</code>
-    </div>
-  </div>
 
   {#if error}
     <div class="mb-4 p-4 bg-destructive/10 border border-destructive rounded text-destructive">
@@ -181,6 +140,77 @@
           init={(api) => {
             // Store the API reference
             fileManagerApi = api;
+            
+            // Handle copy-files operation (SVAR's copy event)
+            api.on('copy-files', async (ev: any) => {
+              const ids = ev.ids || [];
+              const target = ev.target || '/mnt/results';
+              console.log('SVAR copy-files event:', ids, 'to', target);
+              
+              try {
+                for (const fileId of ids) {
+                  const sourcePath = fileId;
+                  const fileName = sourcePath.split('/').pop() || 'file';
+                  
+                  // Determine destination path
+                  let destinationPath: string;
+                  if (target === '/' || target === '') {
+                    destinationPath = `/mnt/results/${fileName}`;
+                  } else if (target.startsWith('/mnt/results')) {
+                    destinationPath = `${target}/${fileName}`;
+                  } else {
+                    destinationPath = `/mnt/results/${target}/${fileName}`;
+                  }
+                  
+                  // If file already exists, add a number suffix
+                  let finalDestination = destinationPath;
+                  let counter = 1;
+                  while (true) {
+                    // Check if destination exists
+                    const targetDir = destinationPath.substring(0, destinationPath.lastIndexOf('/'));
+                    const checkResponse = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(targetDir)}`);
+                    if (checkResponse.ok) {
+                      const checkData = await checkResponse.json();
+                      const existingFiles = (checkData.data || []).map((f: any) => f.id);
+                      if (existingFiles.includes(finalDestination)) {
+                        const nameWithoutExt = fileName.substring(0, fileName.lastIndexOf('.')) || fileName;
+                        const ext = fileName.includes('.') ? fileName.substring(fileName.lastIndexOf('.')) : '';
+                        finalDestination = `${targetDir}/${nameWithoutExt}_${counter}${ext}`;
+                        counter++;
+                      } else {
+                        break;
+                      }
+                    } else {
+                      break;
+                    }
+                  }
+                  
+                  // Copy the file
+                  const copyResponse = await fetch(`${apiUrl}/api/v1/pv/copy?source_path=${encodeURIComponent(sourcePath)}&destination_path=${encodeURIComponent(finalDestination)}`, {
+                    method: 'POST'
+                  });
+                  
+                  if (!copyResponse.ok) {
+                    const errorData = await copyResponse.json();
+                    console.error('Error copying file:', errorData);
+                    alert(`Failed to copy ${fileName}: ${errorData.detail || 'Unknown error'}`);
+                    return false; // Prevent the operation in SVAR
+                  }
+                }
+                
+                // Refresh the file list
+                await fetchFiles(currentPath);
+                
+                // Refresh SVAR's view
+                api.exec('refresh');
+                
+                return true; // Allow the operation
+              } catch (err) {
+                console.error('Error handling copy-files:', err);
+                alert(`Error copying files: ${err instanceof Error ? err.message : 'Unknown error'}`);
+                return false; // Prevent the operation in SVAR
+              }
+            });
             
             // Handle request-data event for dynamic folder loading
             api.on('request-data', async (ev: any) => {
