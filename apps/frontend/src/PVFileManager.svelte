@@ -141,13 +141,16 @@
             // Store the API reference
             fileManagerApi = api;
             
-            // Handle copy-files operation (SVAR's copy event)
-            api.on('copy-files', async (ev: any) => {
+            // Intercept copy-files to calculate and use actual destination paths
+            api.intercept('copy-files', async (ev: any) => {
               const ids = ev.ids || [];
               const target = ev.target || '/mnt/results';
-              console.log('SVAR copy-files event:', ids, 'to', target);
+              console.log('SVAR copy-files intercepted:', ids, 'to', target);
               
               try {
+                const actualDestinations: string[] = [];
+                
+                // Calculate actual destination paths and perform copy for each file
                 for (const fileId of ids) {
                   const sourcePath = fileId;
                   const fileName = sourcePath.split('/').pop() || 'file';
@@ -196,15 +199,35 @@
                     alert(`Failed to copy ${fileName}: ${errorData.detail || 'Unknown error'}`);
                     return false; // Prevent the operation in SVAR
                   }
+                  
+                  actualDestinations.push(finalDestination);
                 }
                 
-                // Refresh the file list
-                await fetchFiles(currentPath);
+                // Get the target directory to update
+                const targetDir = target === '/' || target === '' 
+                  ? '/mnt/results' 
+                  : (target.startsWith('/mnt/results') ? target : `/mnt/results/${target}`);
                 
-                // Refresh SVAR's view
-                api.exec('refresh');
+                // Immediately fetch and provide updated data to replace temp files
+                // Use a small delay to ensure the file system has updated
+                setTimeout(async () => {
+                  const refreshResponse = await fetch(`${apiUrl}/api/v1/pv/files?path=${encodeURIComponent(targetDir)}`);
+                  if (refreshResponse.ok) {
+                    const refreshData = await refreshResponse.json();
+                    const updatedItems = (refreshData.data || []).map((item: any) => ({
+                      id: item.id,
+                      size: item.size || 0,
+                      date: new Date(item.date),
+                      type: item.type
+                    }));
+                    
+                    // Provide updated data to SVAR to replace temp entries with actual files
+                    api.exec('provide-data', { data: updatedItems, id: targetDir });
+                  }
+                }, 100);
                 
-                return true; // Allow the operation
+                // Continue with the intercepted event
+                return ev;
               } catch (err) {
                 console.error('Error handling copy-files:', err);
                 alert(`Error copying files: ${err instanceof Error ? err.message : 'Unknown error'}`);
