@@ -848,10 +848,11 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     {#if showDependencies}
       <div class="mb-4 p-4 border rounded bg-muted/50">
         <div class="mb-4">
-          <label class="block text-sm font-medium mb-2">
+          <label for="dependencies-input" class="block text-sm font-medium mb-2">
             Package Dependencies (space or comma-separated)
           </label>
           <input
+            id="dependencies-input"
             type="text"
             bind:value={dependencies}
             placeholder="e.g., numpy pandas requests"
@@ -864,16 +865,17 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         </div>
         
         <div class="mb-2">
-          <label class="block text-sm font-medium mb-2">
+          <label for="requirements-file-input" class="block text-sm font-medium mb-2">
             Requirements File (alternative to package list)
           </label>
           <textarea
+            id="requirements-file-input"
             bind:value={requirementsFile}
             placeholder="numpy==1.24.0&#10;pandas>=2.0.0&#10;requests==2.31.0"
             class="w-full px-3 py-2 border rounded bg-background font-mono text-sm"
             rows="5"
             disabled={submitting}
-          />
+          ></textarea>
           <p class="text-xs text-muted-foreground mt-1">
             Enter requirements.txt format. If provided, this takes precedence over package dependencies.
           </p>
