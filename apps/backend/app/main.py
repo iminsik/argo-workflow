@@ -68,21 +68,45 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Kubernetes configuration
+# Supports both in-cluster config (when running in K8s) and external config (local dev or external cluster)
+KUBERNETES_CLUSTER_TYPE = os.getenv("KUBERNETES_CLUSTER_TYPE", "auto")  # "auto", "kind", "eks", "external"
+KUBECONFIG_PATH = os.getenv("KUBECONFIG", os.path.expanduser("~/.kube/config"))
+
 try:
     config.load_incluster_config()
+    print("Using in-cluster Kubernetes configuration")
 except:
-    config.load_kube_config()
-    # Patch configuration for Docker: replace 127.0.0.1 with host.docker.internal
-    # and disable SSL verification for development (kind uses self-signed certs)
-    from kubernetes.client import Configuration
-    import urllib3
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    configuration = Configuration.get_default_copy()
-    if configuration.host and '127.0.0.1' in configuration.host:
-        configuration.host = configuration.host.replace('127.0.0.1', 'host.docker.internal')
-        # Disable SSL verification for development (kind uses self-signed certs)
-        configuration.verify_ssl = False
-        Configuration.set_default(configuration)
+    # Load kubeconfig from specified path or default location
+    if os.path.exists(KUBECONFIG_PATH):
+        config.load_kube_config(config_file=KUBECONFIG_PATH)
+        print(f"Loaded Kubernetes config from {KUBECONFIG_PATH}")
+    else:
+        config.load_kube_config()
+        print("Loaded Kubernetes config from default location")
+    
+    # Apply KinD-specific patches only if explicitly using KinD or auto-detecting localhost
+    should_patch_kind = (
+        KUBERNETES_CLUSTER_TYPE == "kind" or 
+        (KUBERNETES_CLUSTER_TYPE == "auto" and os.getenv("KIND_CLUSTER", "").lower() == "true")
+    )
+    
+    if should_patch_kind:
+        # Patch configuration for Docker: replace 127.0.0.1 with host.docker.internal
+        # and disable SSL verification for development (kind uses self-signed certs)
+        from kubernetes.client import Configuration
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        configuration = Configuration.get_default_copy()
+        if configuration.host and '127.0.0.1' in configuration.host:
+            configuration.host = configuration.host.replace('127.0.0.1', 'host.docker.internal')
+            # Disable SSL verification for development (kind uses self-signed certs)
+            configuration.verify_ssl = False
+            Configuration.set_default(configuration)
+            print("Applied KinD-specific configuration patches")
+    elif KUBERNETES_CLUSTER_TYPE in ("eks", "external"):
+        # For external clusters (EKS, etc.), use standard configuration
+        print(f"Using external Kubernetes cluster configuration (type: {KUBERNETES_CLUSTER_TYPE})")
 
 class TaskSubmitRequest(BaseModel):
     pythonCode: str = "print('Processing task in Kind...')"

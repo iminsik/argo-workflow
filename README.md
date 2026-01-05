@@ -14,7 +14,9 @@ This monorepo contains:
 ### Prerequisites
 
 - Docker and Docker Compose
-- Kubernetes cluster (Kind recommended for local development)
+- Kubernetes cluster:
+  - **Local**: Kind recommended for local development
+  - **Cloud**: AWS EKS supported (see [AWS_EKS_SETUP.md](./AWS_EKS_SETUP.md))
 - kubectl configured to access your cluster
 
 ### For Developers
@@ -24,6 +26,24 @@ See [DEVELOPER.md](./DEVELOPER.md) for detailed development setup and workflow.
 ### For DevOps
 
 See [DEVOPS.md](./DEVOPS.md) for deployment and infrastructure management.
+
+### AWS EKS Deployment
+
+This application supports deployment to AWS EKS (Elastic Kubernetes Service) clusters.
+
+**For detailed AWS EKS setup instructions, see [AWS_EKS_SETUP.md](./AWS_EKS_SETUP.md).**
+
+**Quick Overview:**
+- Supports both local KinD clusters and external AWS EKS clusters
+- Configurable via environment variables
+- Uses EFS (Elastic File System) for persistent storage
+- Works with standard kubeconfig files from AWS
+
+**Prerequisites:**
+- AWS account with EKS access
+- AWS CLI configured
+- kubectl and eksctl installed
+- EKS cluster created and configured
 
 ### Bunnyshell Deployment
 

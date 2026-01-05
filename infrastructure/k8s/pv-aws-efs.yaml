@@ -1,0 +1,54 @@
+# AWS EKS PersistentVolume using EFS (Elastic File System)
+# This configuration is for AWS EKS clusters
+# Prerequisites:
+# 1. EFS CSI driver installed in your cluster: https://docs.aws.amazon.com/eks/latest/userguide/efs-csi.html
+# 2. EFS file system created in AWS
+# 3. EFS access points configured (optional, for better security)
+#
+# To use this:
+# 1. Create an EFS file system in AWS Console or using AWS CLI
+# 2. Get the EFS file system ID (e.g., fs-12345678)
+# 3. Replace <EFS_FILE_SYSTEM_ID> below with your EFS ID
+# 4. Apply this file: kubectl apply -f infrastructure/k8s/pv-aws-efs.yaml
+
+apiVersion: v1
+kind: StorageClass
+metadata:
+  name: efs-sc
+provisioner: efs.csi.aws.com
+parameters:
+  provisioningMode: efs-ap  # Use access points for better security
+  fileSystemId: <EFS_FILE_SYSTEM_ID>  # Replace with your EFS file system ID
+  directoryPerms: "0777"
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: task-results-pv-efs
+  labels:
+    type: efs
+spec:
+  storageClassName: efs-sc
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  csi:
+    driver: efs.csi.aws.com
+    volumeHandle: <EFS_FILE_SYSTEM_ID>::<ACCESS_POINT_ID>  # Replace with EFS ID and access point ID
+    # If not using access points, use: volumeHandle: <EFS_FILE_SYSTEM_ID>
+  persistentVolumeReclaimPolicy: Retain
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: task-results-pvc
+  namespace: argo
+spec:
+  storageClassName: efs-sc
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+

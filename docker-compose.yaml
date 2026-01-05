@@ -12,13 +12,27 @@ services:
     build:
       context: ./apps/backend
       dockerfile: Dockerfile.dev
-    volumes: [ "./apps/backend:/app", "~/.kube:/root/.kube:ro", "./infrastructure:/infrastructure:ro" ]
+    volumes: 
+      - "./apps/backend:/app"
+      # Kubeconfig volume - mount your kubeconfig for external clusters
+      # For local KinD: ~/.kube:/root/.kube:ro
+      # For AWS EKS: mount the kubeconfig file you downloaded from AWS
+      - "${KUBECONFIG_PATH:-~/.kube}:/root/.kube:ro"
+      - "./infrastructure:/infrastructure:ro"
     ports: ["8000:8000"]
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/postgres
+      # Kubernetes cluster configuration
+      # Options: "auto" (default, auto-detect), "kind" (local KinD), "eks" (AWS EKS), "external" (other external cluster)
+      - KUBERNETES_CLUSTER_TYPE=${KUBERNETES_CLUSTER_TYPE:-auto}
+      # Path to kubeconfig file (default: ~/.kube/config)
+      - KUBECONFIG=${KUBECONFIG:-/root/.kube/config}
+      # Set to "true" if using local KinD cluster
+      - KIND_CLUSTER=${KIND_CLUSTER:-false}
     depends_on:
       postgres:
         condition: service_healthy
+    # Uncomment for local KinD cluster access from Docker
     # extra_hosts:
     #   - "host.docker.internal:host-gateway"
   frontend:
