@@ -839,8 +839,336 @@ def determine_workflow_phase(status: dict) -> str:
     # Return the workflow phase as-is for other cases
     return phase
 
+def create_and_submit_workflow(
+    python_code: str,
+    dependencies: str | None = None,
+    requirements_file: str | None = None,
+    namespace: str = "argo"
+) -> str:
+    """
+    Helper function to create and submit an Argo Workflow.
+    Returns the workflow ID.
+    """
+    # Check if PVC exists and is bound before creating workflow
+    core_api = CoreV1Api()
+    try:
+        pvc = core_api.read_namespaced_persistent_volume_claim(
+            name="task-results-pvc",
+            namespace=namespace
+        )
+        pvc_status = pvc.status.phase if pvc.status else "Unknown"
+        if pvc_status != "Bound":
+            raise HTTPException(
+                status_code=400, 
+                detail=f"PVC 'task-results-pvc' is not bound. Current status: {pvc_status}. Please ensure the PV is available."
+            )
+    except Exception as pvc_error:
+        # If PVC doesn't exist, that's also a problem
+        if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
+            raise HTTPException(
+                status_code=400,
+                detail="PVC 'task-results-pvc' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pv.yaml"
+            )
+        # Re-raise if it's our HTTPException
+        if isinstance(pvc_error, HTTPException):
+            raise pvc_error
+        # Otherwise log and continue (might be a transient issue)
+        print(f"Warning: Could not verify PVC status: {pvc_error}")
+    
+    # Feature flag: Use Hera SDK if enabled and available
+    use_hera_for_this_request = USE_HERA_SDK and HERA_AVAILABLE
+    workflow_id = None
+    
+    if use_hera_for_this_request:
+        # Create workflow using Hera SDK (simplified approach)
+        try:
+            workflow_id = create_workflow_with_hera(
+                python_code=python_code,
+                dependencies=dependencies,
+                requirements_file=requirements_file,
+                namespace=namespace
+            )
+        except HTTPException:
+            raise
+        except Exception as hera_error:
+            # If Hera fails, log and fall back to current implementation
+            print(f"Warning: Hera SDK workflow creation failed: {hera_error}. Falling back to current implementation.")
+            use_hera_for_this_request = False  # Fall back for this request
+    
+    # Current implementation (used when Hera SDK is disabled or fails)
+    if not use_hera_for_this_request:
+        # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
+        api_instance = CustomObjectsApi()
+        
+        # Choose workflow template based on whether dependencies are provided
+        has_dependencies = bool(dependencies or requirements_file)
+        
+        # Determine workflow template path
+        # Try absolute path first (for Docker), then relative path (for local dev)
+        def find_workflow_template(default_absolute_path: str, default_relative_path: str, env_var_name: str | None = None) -> str:
+            """Find workflow template, trying absolute path first, then relative."""
+            # Check environment variable first
+            if env_var_name:
+                env_path = os.getenv(env_var_name)
+                if env_path and os.path.exists(env_path):
+                    return env_path
+            
+            # Try absolute path (Docker/production)
+            if os.path.exists(default_absolute_path):
+                return default_absolute_path
+            
+            # Try relative path from project root (local development)
+            # Get project root (assuming we're in apps/backend/app/)
+            current_file = os.path.abspath(__file__)
+            backend_dir = os.path.dirname(os.path.dirname(current_file))  # apps/backend
+            project_root = os.path.dirname(os.path.dirname(backend_dir))  # project root
+            relative_path = os.path.join(project_root, default_relative_path)
+            
+            if os.path.exists(relative_path):
+                return relative_path
+            
+            # If neither exists, return the absolute path (will fail with clear error)
+            return default_absolute_path
+        
+        if has_dependencies:
+            workflow_path = find_workflow_template(
+                "/infrastructure/argo/python-processor-with-deps.yaml",
+                "infrastructure/argo/python-processor-with-deps.yaml",
+                "WORKFLOW_MANIFEST_PATH_DEPS"
+            )
+            # Fallback to simple template if deps template doesn't exist
+            if not os.path.exists(workflow_path):
+                workflow_path = find_workflow_template(
+                    "/infrastructure/argo/python-processor.yaml",
+                    "infrastructure/argo/python-processor.yaml",
+                    "WORKFLOW_MANIFEST_PATH"
+                )
+        else:
+            workflow_path = find_workflow_template(
+                "/infrastructure/argo/python-processor.yaml",
+                "infrastructure/argo/python-processor.yaml",
+                "WORKFLOW_MANIFEST_PATH"
+            )
+        
+        # Read YAML file
+        with open(workflow_path, "r") as f:
+            manifest_dict = yaml.safe_load(f)
+        
+        # Construct workflow object with proper nested objects
+        # Convert metadata dict to argo_workflows ObjectMeta
+        metadata_dict = manifest_dict.get("metadata", {})
+        metadata = ObjectMeta(**metadata_dict) if metadata_dict else None
+        
+        # Convert spec dict to argo_workflows WorkflowSpec
+        # Need to handle nested templates array and container/script objects
+        spec_dict = manifest_dict.get("spec", {}).copy() if manifest_dict.get("spec") else {}
+        
+        # Extract volumes to add back later (WorkflowSpec validation might fail with dict volumes)
+        volumes = spec_dict.pop("volumes", [])
+        
+        # Check if we have dependencies - if so, we'll work with dicts directly to avoid validation issues
+        has_dependencies = bool(dependencies or requirements_file)
+        use_dict_approach = has_dependencies and "script" in str(manifest_dict.get("spec", {}).get("templates", [{}])[0])
+    
+        if "templates" in spec_dict and spec_dict["templates"]:
+            if use_dict_approach:
+                # For script templates, work with dicts directly to avoid ScriptTemplate validation issues
+                templates = []
+                for template_dict in spec_dict["templates"]:
+                    template_dict_copy = template_dict.copy()
+                    
+                    if "script" in template_dict_copy and template_dict_copy["script"]:
+                        script_dict = template_dict_copy["script"].copy()
+                        env_vars = script_dict.get("env", [])
+                        
+                        # Update PYTHON_CODE env var
+                        for env_var in env_vars:
+                            if env_var.get("name") == "PYTHON_CODE":
+                                env_var["value"] = python_code
+                                break
+                        else:
+                            env_vars.append({"name": "PYTHON_CODE", "value": python_code})
+                        
+                        # Update DEPENDENCIES env var and handle requirements file
+                        dependencies_value = ""
+                        if requirements_file:
+                            script_source = script_dict.get("source", "")
+                            requirements_content = requirements_file
+                            requirements_setup = f'''
+# Write requirements file
+cat > /tmp/requirements.txt << 'REQ_EOF'
+{requirements_content}
+REQ_EOF
+'''
+                            if 'source "$VENV_DIR/bin/activate"' in script_source:
+                                script_source = script_source.replace(
+                                    'source "$VENV_DIR/bin/activate"',
+                                    f'source "$VENV_DIR/bin/activate"\n{requirements_setup}'
+                                )
+                            script_dict["source"] = script_source
+                            dependencies_value = "requirements.txt"
+                        elif dependencies:
+                            dependencies_value = dependencies
+                        
+                        # Update DEPENDENCIES env var
+                        for env_var in env_vars:
+                            if env_var.get("name") == "DEPENDENCIES":
+                                env_var["value"] = dependencies_value
+                                break
+                        else:
+                            env_vars.append({"name": "DEPENDENCIES", "value": dependencies_value})
+                        
+                        script_dict["env"] = env_vars
+                        template_dict_copy["script"] = script_dict
+                    
+                    # Keep as dict for script templates, convert to Template object for container templates
+                    if "script" in template_dict_copy:
+                        templates.append(template_dict_copy)  # Keep as dict
+                    else:
+                        # For container templates, use Template object
+                        if "container" in template_dict_copy and template_dict_copy["container"]:
+                            container_dict = template_dict_copy["container"].copy()
+                            volume_mounts = container_dict.get("volumeMounts", [])
+                            env_vars = container_dict.pop("env", [])
+                            if "args" in container_dict and container_dict["args"]:
+                                container_dict["args"] = [python_code]
+                            else:
+                                container_dict["args"] = [python_code]
+                            template_dict_copy["container"] = Container(**container_dict)
+                            template_dict_copy["_volume_mounts"] = volume_mounts
+                            template_dict_copy["_env"] = env_vars
+                        templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
+            else:
+                # Original approach for container templates
+                templates = []
+                for template_dict in spec_dict["templates"]:
+                    template_dict_copy = template_dict.copy()
+                    
+                    if "container" in template_dict_copy and template_dict_copy["container"]:
+                        container_dict = template_dict_copy["container"].copy()
+                        volume_mounts = container_dict.get("volumeMounts", [])
+                        env_vars = container_dict.pop("env", [])
+                        if "args" in container_dict and container_dict["args"]:
+                            container_dict["args"] = [python_code]
+                        else:
+                            container_dict["args"] = [python_code]
+                        template_dict_copy["container"] = Container(**container_dict)
+                        template_dict_copy["_volume_mounts"] = volume_mounts
+                        template_dict_copy["_env"] = env_vars
+                    
+                    templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
+            
+            spec_dict["templates"] = templates
+        
+        # If using dict approach for script templates, build workflow dict directly
+        if use_dict_approach:
+            from argo_workflows.api_client import ApiClient  # type: ignore
+            api_client = ApiClient()
+            workflow_dict = {
+                "apiVersion": manifest_dict.get("apiVersion"),
+                "kind": manifest_dict.get("kind"),
+                "metadata": api_client.sanitize_for_serialization(metadata) if metadata else manifest_dict.get("metadata", {}),
+                "spec": spec_dict
+            }
+            # Add volumes back
+            if volumes:
+                workflow_dict["spec"]["volumes"] = volumes
+        else:
+            spec = IoArgoprojWorkflowV1alpha1WorkflowSpec(**spec_dict) if spec_dict else None
+            
+            # Construct workflow object with proper types
+            workflow = IoArgoprojWorkflowV1alpha1Workflow(
+                api_version=manifest_dict.get("apiVersion"),
+                kind=manifest_dict.get("kind"),
+                metadata=metadata,
+                spec=spec
+            )
+            
+            # Convert workflow object to dict for Kubernetes API
+            # Use the ApiClient to serialize the workflow object
+            from argo_workflows.api_client import ApiClient
+            api_client = ApiClient()
+            workflow_dict = api_client.sanitize_for_serialization(workflow)
+            
+            # Add volumes back to the workflow dict
+            if volumes:
+                if "spec" not in workflow_dict:
+                    workflow_dict["spec"] = {}
+                workflow_dict["spec"]["volumes"] = volumes
+        
+        # Ensure volumeMounts and env are preserved in the container/script
+        # The Container/Script object might not serialize volumeMounts/env, so we add them back
+        if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
+            for i, template in enumerate(workflow_dict["spec"]["templates"]):
+                original_template = manifest_dict.get("spec", {}).get("templates", [])
+                if original_template and i < len(original_template):
+                    original_template_item = original_template[i]
+                    
+                    # Handle container template
+                    if "container" in template and "container" in original_template_item:
+                        original_container = original_template_item.get("container", {})
+                        original_volume_mounts = original_container.get("volumeMounts", [])
+                        original_env = original_container.get("env", [])
+                        if original_volume_mounts:
+                            # Always add volumeMounts back (they might be missing after serialization)
+                            template["container"]["volumeMounts"] = original_volume_mounts
+                        if original_env:
+                            # Always add env back (they might be missing after serialization)
+                            template["container"]["env"] = original_env
+                    
+                    # Handle script template
+                    elif "script" in template and "script" in original_template_item:
+                        original_script = original_template_item.get("script", {})
+                        original_volume_mounts = original_script.get("volumeMounts", [])
+                        original_env = original_script.get("env", [])
+                        
+                        # After serialization, script is already a dict, ensure volumeMounts are present
+                        if original_volume_mounts and "volumeMounts" not in template.get("script", {}):
+                            template["script"]["volumeMounts"] = original_volume_mounts
+                        
+                        # For script templates, we've already updated env vars, but ensure they're preserved
+                        if original_env:
+                            # Convert to dict if needed
+                            if not isinstance(template["script"], dict):
+                                from argo_workflows.api_client import ApiClient
+                                api_client = ApiClient()
+                                template["script"] = api_client.sanitize_for_serialization(template["script"])
+                            
+                            # Merge with our updated env vars
+                            existing_env_names = {env.get("name") for env in template.get("script", {}).get("env", [])}
+                            for env_var in original_env:
+                                if env_var.get("name") not in existing_env_names:
+                                    if "env" not in template["script"]:
+                                        template["script"]["env"] = []
+                                    template["script"]["env"].append(env_var)
+    
+        # Create workflow using Kubernetes CustomObjectsApi
+        # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
+        result = api_instance.create_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workflows",
+            body=workflow_dict
+        )
+        
+        workflow_id = result.get("metadata", {}).get("name", "unknown")
+    
+    if not workflow_id or workflow_id == "unknown":
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to extract workflow ID from created workflow"
+        )
+    
+    return workflow_id
+
+
 @app.post("/api/v1/tasks/submit")
-async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
+async def submit_task(request: TaskSubmitRequest = TaskSubmitRequest()):
+    """
+    Submit a task to be saved in the database without running it.
+    The task will have status 'Not Started' until it is explicitly run.
+    """
     try:
         # Validate dependencies if provided
         if request.dependencies:
@@ -867,319 +1195,12 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                     detail="Requirements file is too long (max 50000 characters)"
                 )
         
-        namespace = os.getenv("ARGO_NAMESPACE", "argo")
-        
-        # Check if PVC exists and is bound before creating workflow
-        core_api = CoreV1Api()
-        try:
-            pvc = core_api.read_namespaced_persistent_volume_claim(
-                name="task-results-pvc",
-                namespace=namespace
-            )
-            pvc_status = pvc.status.phase if pvc.status else "Unknown"
-            if pvc_status != "Bound":
-                raise HTTPException(
-                    status_code=400, 
-                    detail=f"PVC 'task-results-pvc' is not bound. Current status: {pvc_status}. Please ensure the PV is available."
-                )
-        except Exception as pvc_error:
-            # If PVC doesn't exist, that's also a problem
-            if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
-                raise HTTPException(
-                    status_code=400,
-                    detail="PVC 'task-results-pvc' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pv.yaml"
-                )
-            # Re-raise if it's our HTTPException
-            if isinstance(pvc_error, HTTPException):
-                raise pvc_error
-            # Otherwise log and continue (might be a transient issue)
-            print(f"Warning: Could not verify PVC status: {pvc_error}")
-        
-        # Feature flag: Use Hera SDK if enabled and available
-        use_hera_for_this_request = USE_HERA_SDK and HERA_AVAILABLE
-        workflow_id = None
-        
-        if use_hera_for_this_request:
-            # Create workflow using Hera SDK (simplified approach)
-            try:
-                workflow_id = create_workflow_with_hera(
-                    python_code=request.pythonCode,
-                    dependencies=request.dependencies,
-                    requirements_file=request.requirementsFile,
-                    namespace=namespace
-                )
-            except HTTPException:
-                raise
-            except Exception as hera_error:
-                # If Hera fails, log and fall back to current implementation
-                print(f"Warning: Hera SDK workflow creation failed: {hera_error}. Falling back to current implementation.")
-                use_hera_for_this_request = False  # Fall back for this request
-        
-        # Current implementation (used when Hera SDK is disabled or fails)
-        if not use_hera_for_this_request:
-            # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
-            api_instance = CustomObjectsApi()
-            
-            # Choose workflow template based on whether dependencies are provided
-            has_dependencies = bool(request.dependencies or request.requirementsFile)
-            
-            # Determine workflow template path
-            # Try absolute path first (for Docker), then relative path (for local dev)
-            def find_workflow_template(default_absolute_path: str, default_relative_path: str, env_var_name: str | None = None) -> str:
-                """Find workflow template, trying absolute path first, then relative."""
-                # Check environment variable first
-                if env_var_name:
-                    env_path = os.getenv(env_var_name)
-                    if env_path and os.path.exists(env_path):
-                        return env_path
-                
-                # Try absolute path (Docker/production)
-                if os.path.exists(default_absolute_path):
-                    return default_absolute_path
-                
-                # Try relative path from project root (local development)
-                # Get project root (assuming we're in apps/backend/app/)
-                current_file = os.path.abspath(__file__)
-                backend_dir = os.path.dirname(os.path.dirname(current_file))  # apps/backend
-                project_root = os.path.dirname(os.path.dirname(backend_dir))  # project root
-                relative_path = os.path.join(project_root, default_relative_path)
-                
-                if os.path.exists(relative_path):
-                    return relative_path
-                
-                # If neither exists, return the absolute path (will fail with clear error)
-                return default_absolute_path
-            
-            if has_dependencies:
-                workflow_path = find_workflow_template(
-                    "/infrastructure/argo/python-processor-with-deps.yaml",
-                    "infrastructure/argo/python-processor-with-deps.yaml",
-                    "WORKFLOW_MANIFEST_PATH_DEPS"
-                )
-                # Fallback to simple template if deps template doesn't exist
-                if not os.path.exists(workflow_path):
-                    workflow_path = find_workflow_template(
-                        "/infrastructure/argo/python-processor.yaml",
-                        "infrastructure/argo/python-processor.yaml",
-                        "WORKFLOW_MANIFEST_PATH"
-                    )
-            else:
-                workflow_path = find_workflow_template(
-                    "/infrastructure/argo/python-processor.yaml",
-                    "infrastructure/argo/python-processor.yaml",
-                    "WORKFLOW_MANIFEST_PATH"
-                )
-            
-            # Read YAML file
-            with open(workflow_path, "r") as f:
-                manifest_dict = yaml.safe_load(f)
-            
-            # Construct workflow object with proper nested objects
-            # Convert metadata dict to argo_workflows ObjectMeta
-            metadata_dict = manifest_dict.get("metadata", {})
-            metadata = ObjectMeta(**metadata_dict) if metadata_dict else None
-            
-            # Convert spec dict to argo_workflows WorkflowSpec
-            # Need to handle nested templates array and container/script objects
-            spec_dict = manifest_dict.get("spec", {}).copy() if manifest_dict.get("spec") else {}
-            
-            # Extract volumes to add back later (WorkflowSpec validation might fail with dict volumes)
-            volumes = spec_dict.pop("volumes", [])
-            
-            # Check if we have dependencies - if so, we'll work with dicts directly to avoid validation issues
-            has_dependencies = bool(request.dependencies or request.requirementsFile)
-            use_dict_approach = has_dependencies and "script" in str(manifest_dict.get("spec", {}).get("templates", [{}])[0])
-        
-            if "templates" in spec_dict and spec_dict["templates"]:
-                if use_dict_approach:
-                    # For script templates, work with dicts directly to avoid ScriptTemplate validation issues
-                    templates = []
-                    for template_dict in spec_dict["templates"]:
-                        template_dict_copy = template_dict.copy()
-                        
-                        if "script" in template_dict_copy and template_dict_copy["script"]:
-                            script_dict = template_dict_copy["script"].copy()
-                            env_vars = script_dict.get("env", [])
-                            
-                            # Update PYTHON_CODE env var
-                            for env_var in env_vars:
-                                if env_var.get("name") == "PYTHON_CODE":
-                                    env_var["value"] = request.pythonCode
-                                    break
-                            else:
-                                env_vars.append({"name": "PYTHON_CODE", "value": request.pythonCode})
-                            
-                            # Update DEPENDENCIES env var and handle requirements file
-                            dependencies_value = ""
-                            if request.requirementsFile:
-                                script_source = script_dict.get("source", "")
-                                requirements_content = request.requirementsFile
-                                requirements_setup = f'''
-# Write requirements file
-cat > /tmp/requirements.txt << 'REQ_EOF'
-{requirements_content}
-REQ_EOF
-'''
-                                if 'source "$VENV_DIR/bin/activate"' in script_source:
-                                    script_source = script_source.replace(
-                                        'source "$VENV_DIR/bin/activate"',
-                                        f'source "$VENV_DIR/bin/activate"\n{requirements_setup}'
-                                    )
-                                script_dict["source"] = script_source
-                                dependencies_value = "requirements.txt"
-                            elif request.dependencies:
-                                dependencies_value = request.dependencies
-                            
-                            # Update DEPENDENCIES env var
-                            for env_var in env_vars:
-                                if env_var.get("name") == "DEPENDENCIES":
-                                    env_var["value"] = dependencies_value
-                                    break
-                            else:
-                                env_vars.append({"name": "DEPENDENCIES", "value": dependencies_value})
-                            
-                            script_dict["env"] = env_vars
-                            template_dict_copy["script"] = script_dict
-                        
-                        # Keep as dict for script templates, convert to Template object for container templates
-                        if "script" in template_dict_copy:
-                            templates.append(template_dict_copy)  # Keep as dict
-                        else:
-                            # For container templates, use Template object
-                            if "container" in template_dict_copy and template_dict_copy["container"]:
-                                container_dict = template_dict_copy["container"].copy()
-                                volume_mounts = container_dict.get("volumeMounts", [])
-                                env_vars = container_dict.pop("env", [])
-                                if "args" in container_dict and container_dict["args"]:
-                                    container_dict["args"] = [request.pythonCode]
-                                else:
-                                    container_dict["args"] = [request.pythonCode]
-                                template_dict_copy["container"] = Container(**container_dict)
-                                template_dict_copy["_volume_mounts"] = volume_mounts
-                                template_dict_copy["_env"] = env_vars
-                            templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
-                else:
-                    # Original approach for container templates
-                    templates = []
-                    for template_dict in spec_dict["templates"]:
-                        template_dict_copy = template_dict.copy()
-                        
-                        if "container" in template_dict_copy and template_dict_copy["container"]:
-                            container_dict = template_dict_copy["container"].copy()
-                            volume_mounts = container_dict.get("volumeMounts", [])
-                            env_vars = container_dict.pop("env", [])
-                            if "args" in container_dict and container_dict["args"]:
-                                container_dict["args"] = [request.pythonCode]
-                            else:
-                                container_dict["args"] = [request.pythonCode]
-                            template_dict_copy["container"] = Container(**container_dict)
-                            template_dict_copy["_volume_mounts"] = volume_mounts
-                            template_dict_copy["_env"] = env_vars
-                        
-                        templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
-                
-                spec_dict["templates"] = templates
-            
-            # If using dict approach for script templates, build workflow dict directly
-            if use_dict_approach:
-                from argo_workflows.api_client import ApiClient  # type: ignore
-                api_client = ApiClient()
-                workflow_dict = {
-                    "apiVersion": manifest_dict.get("apiVersion"),
-                    "kind": manifest_dict.get("kind"),
-                    "metadata": api_client.sanitize_for_serialization(metadata) if metadata else manifest_dict.get("metadata", {}),
-                    "spec": spec_dict
-                }
-                # Add volumes back
-                if volumes:
-                    workflow_dict["spec"]["volumes"] = volumes
-            else:
-                spec = IoArgoprojWorkflowV1alpha1WorkflowSpec(**spec_dict) if spec_dict else None
-                
-                # Construct workflow object with proper types
-                workflow = IoArgoprojWorkflowV1alpha1Workflow(
-                    api_version=manifest_dict.get("apiVersion"),
-                    kind=manifest_dict.get("kind"),
-                    metadata=metadata,
-                    spec=spec
-                )
-                
-                # Convert workflow object to dict for Kubernetes API
-                # Use the ApiClient to serialize the workflow object
-                from argo_workflows.api_client import ApiClient
-                api_client = ApiClient()
-                workflow_dict = api_client.sanitize_for_serialization(workflow)
-                
-                # Add volumes back to the workflow dict
-                if volumes:
-                    if "spec" not in workflow_dict:
-                        workflow_dict["spec"] = {}
-                    workflow_dict["spec"]["volumes"] = volumes
-            
-            # Ensure volumeMounts and env are preserved in the container/script
-            # The Container/Script object might not serialize volumeMounts/env, so we add them back
-            if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
-                for i, template in enumerate(workflow_dict["spec"]["templates"]):
-                    original_template = manifest_dict.get("spec", {}).get("templates", [])
-                    if original_template and i < len(original_template):
-                        original_template_item = original_template[i]
-                        
-                        # Handle container template
-                        if "container" in template and "container" in original_template_item:
-                            original_container = original_template_item.get("container", {})
-                            original_volume_mounts = original_container.get("volumeMounts", [])
-                            original_env = original_container.get("env", [])
-                            if original_volume_mounts:
-                                # Always add volumeMounts back (they might be missing after serialization)
-                                template["container"]["volumeMounts"] = original_volume_mounts
-                            if original_env:
-                                # Always add env back (they might be missing after serialization)
-                                template["container"]["env"] = original_env
-                        
-                        # Handle script template
-                        elif "script" in template and "script" in original_template_item:
-                            original_script = original_template_item.get("script", {})
-                            original_volume_mounts = original_script.get("volumeMounts", [])
-                            original_env = original_script.get("env", [])
-                            
-                            # After serialization, script is already a dict, ensure volumeMounts are present
-                            if original_volume_mounts and "volumeMounts" not in template.get("script", {}):
-                                template["script"]["volumeMounts"] = original_volume_mounts
-                            
-                            # For script templates, we've already updated env vars, but ensure they're preserved
-                            if original_env:
-                                # Convert to dict if needed
-                                if not isinstance(template["script"], dict):
-                                    from argo_workflows.api_client import ApiClient
-                                    api_client = ApiClient()
-                                    template["script"] = api_client.sanitize_for_serialization(template["script"])
-                                
-                                # Merge with our updated env vars
-                                existing_env_names = {env.get("name") for env in template.get("script", {}).get("env", [])}
-                                for env_var in original_env:
-                                    if env_var.get("name") not in existing_env_names:
-                                        if "env" not in template["script"]:
-                                            template["script"]["env"] = []
-                                        template["script"]["env"].append(env_var)
-        
-            # Create workflow using Kubernetes CustomObjectsApi
-            # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
-            result = api_instance.create_namespaced_custom_object(
-                group="argoproj.io",
-                version="v1alpha1",
-                namespace=namespace,
-                plural="workflows",
-                body=workflow_dict
-            )
-            
-            workflow_id = result.get("metadata", {}).get("name", "unknown")
-        
-        # Create/update Task and TaskRun in database
+        # Only save the task to database, don't create workflow yet
         db = next(get_db())
         try:
             # Determine task_id: use provided taskId for rerun, or generate new one
             if request.taskId:
-                # Rerun: update existing task and create new run
+                # Rerun: update existing task
                 task = db.query(Task).filter(Task.id == request.taskId).first()
                 if not task:
                     raise HTTPException(status_code=404, detail=f"Task {request.taskId} not found")
@@ -1189,30 +1210,8 @@ REQ_EOF
                 task.dependencies = request.dependencies if request.dependencies else None
                 task.requirements_file = request.requirementsFile if request.requirementsFile else None
                 task.updated_at = datetime.utcnow()
-                
-                # Get next run number (check schema first to avoid querying non-existent columns)
-                from sqlalchemy import inspect as sql_inspect, text
-                from app.database import engine
-                inspector = sql_inspect(engine)
-                task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
-                has_python_code = 'python_code' in task_runs_columns
-                
-                if has_python_code:
-                    max_run = db.query(TaskRun).filter(TaskRun.task_id == request.taskId).order_by(TaskRun.run_number.desc()).first()
-                    next_run_number = (max_run.run_number + 1) if max_run else 1
-                else:
-                    result = db.execute(
-                        text("SELECT run_number FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
-                        {"task_id": request.taskId}
-                    ).fetchone()
-                    if result:
-                        next_run_number = (getattr(result, 'run_number', result[0]) + 1) if result else 1
-                    else:
-                        next_run_number = 1
-                
-                task_id = request.taskId
-                # Commit task update before creating TaskRun
                 db.commit()
+                task_id = request.taskId
             else:
                 # New task: create Task record
                 task_id = f"task-{uuid.uuid4().hex[:12]}"
@@ -1223,56 +1222,127 @@ REQ_EOF
                     requirements_file=request.requirementsFile if request.requirementsFile else None
                 )
                 db.add(task)
-                next_run_number = 1
-                # Commit Task first to ensure foreign key constraint is satisfied
                 db.commit()
             
-            # Create TaskRun record with code snapshot (if schema supports it)
-            # Note: has_python_code is already set for reruns, need to check again for new tasks
-            if not request.taskId:
-                from sqlalchemy import inspect as sql_inspect, text
-                from app.database import engine
-                inspector = sql_inspect(engine)
-                task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
-                has_python_code = 'python_code' in task_runs_columns
+            return {
+                "id": task_id,
+                "message": "Task saved successfully. Use /api/v1/tasks/{task_id}/run to execute it."
+            }
+        except HTTPException:
+            db.rollback()
+            raise
+        except Exception as db_error:
+            db.rollback()
+            print(f"Error saving task to database: {db_error}")
+            raise HTTPException(status_code=500, detail=f"Failed to save task: {str(db_error)}")
+        finally:
+            db.close()
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Print full error for debugging
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/v1/tasks/{task_id}/run")
+async def run_task(task_id: str):
+    """
+    Execute a task that was previously saved.
+    Creates the workflow and starts execution.
+    """
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Load task from database
+        db = next(get_db())
+        try:
+            task = db.query(Task).filter(Task.id == task_id).first()
+            if not task:
+                raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+            
+            # Check if task already has a running workflow
+            from sqlalchemy import inspect as sql_inspect, text
+            from app.database import engine
+            inspector = sql_inspect(engine)
+            task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+            has_python_code = 'python_code' in task_runs_columns
             
             if has_python_code:
-                # New schema: store code in TaskRun using ORM
+                latest_run = db.query(TaskRun).filter(
+                    TaskRun.task_id == task_id
+                ).order_by(TaskRun.run_number.desc()).first()
+            else:
+                result = db.execute(
+                    text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+                    {"task_id": task_id}
+                ).fetchone()
+                latest_run = result
+            
+            # Check if latest run is still running
+            if latest_run:
+                latest_phase = latest_run.phase if has_python_code else (latest_run[4] if isinstance(latest_run, tuple) else latest_run.phase)
+                if latest_phase in ["Running", "Pending"]:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Task {task_id} already has a running workflow (run #{latest_run.run_number if has_python_code else (latest_run[3] if isinstance(latest_run, tuple) else latest_run.run_number)}). Please wait for it to complete or cancel it first."
+                    )
+            
+            # Create and submit workflow
+            workflow_id = create_and_submit_workflow(
+                python_code=task.python_code,
+                dependencies=task.dependencies,
+                requirements_file=task.requirements_file,
+                namespace=namespace
+            )
+            
+            # Get next run number
+            if has_python_code:
+                max_run = db.query(TaskRun).filter(TaskRun.task_id == task_id).order_by(TaskRun.run_number.desc()).first()
+                next_run_number = (max_run.run_number + 1) if max_run else 1
+            else:
+                result = db.execute(
+                    text("SELECT run_number FROM task_runs WHERE task_id = :task_id ORDER BY run_number DESC LIMIT 1"),
+                    {"task_id": task_id}
+                ).fetchone()
+                if result:
+                    next_run_number = (getattr(result, 'run_number', result[0]) + 1) if result else 1
+                else:
+                    next_run_number = 1
+            
+            # Create TaskRun record
+            if has_python_code:
                 task_run = TaskRun(
                     task_id=task_id,
                     workflow_id=workflow_id,
                     run_number=next_run_number,
                     phase="Pending",
-                    python_code=request.pythonCode,
-                    dependencies=request.dependencies if request.dependencies else None,
-                    requirements_file=request.requirementsFile if request.requirementsFile else None
+                    python_code=task.python_code,
+                    dependencies=task.dependencies,
+                    requirements_file=task.requirements_file,
+                    started_at=datetime.utcnow()
                 )
                 db.add(task_run)
                 db.commit()
             else:
-                # Old schema: Try to add columns dynamically if they don't exist, then save code
-                # This allows code to be saved per run even without a full migration
+                # Old schema: Try to add columns dynamically if they don't exist
                 try:
-                    # Check if columns exist and add them if not
-                    inspector = sql_inspect(engine)
                     existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
                     
                     if 'python_code' not in existing_columns:
-                        # Add columns dynamically
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS python_code TEXT"))
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS dependencies TEXT"))
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS requirements_file TEXT"))
                         db.commit()
-                        # Refresh inspector
                         inspector = sql_inspect(engine)
                         existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
                     
-                    # Now insert with code if columns exist
                     if 'python_code' in existing_columns:
                         result = db.execute(
                             text("""
-                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, created_at)
-                                VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :created_at)
+                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, started_at, created_at)
+                                VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :started_at, :created_at)
                                 RETURNING id
                             """),
                             {
@@ -1280,18 +1350,19 @@ REQ_EOF
                                 "workflow_id": workflow_id,
                                 "run_number": next_run_number,
                                 "phase": "Pending",
-                                "python_code": request.pythonCode,
-                                "dependencies": request.dependencies if request.dependencies else None,
-                                "requirements_file": request.requirementsFile if request.requirementsFile else None,
+                                "python_code": task.python_code,
+                                "dependencies": task.dependencies,
+                                "requirements_file": task.requirements_file,
+                                "started_at": datetime.utcnow(),
                                 "created_at": datetime.utcnow()
                             }
                         )
+                        db.commit()
                     else:
-                        # Fallback: insert without code columns
                         result = db.execute(
                             text("""
-                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
-                                VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
+                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, started_at, created_at)
+                                VALUES (:task_id, :workflow_id, :run_number, :phase, :started_at, :created_at)
                                 RETURNING id
                             """),
                             {
@@ -1299,17 +1370,17 @@ REQ_EOF
                                 "workflow_id": workflow_id,
                                 "run_number": next_run_number,
                                 "phase": "Pending",
+                                "started_at": datetime.utcnow(),
                                 "created_at": datetime.utcnow()
                             }
                         )
-                    db.commit()
+                        db.commit()
                 except Exception as e:
-                    # If adding columns fails, fall back to basic insert
                     print(f"Warning: Could not add code columns to task_runs: {e}")
                     result = db.execute(
                         text("""
-                            INSERT INTO task_runs (task_id, workflow_id, run_number, phase, created_at)
-                            VALUES (:task_id, :workflow_id, :run_number, :phase, :created_at)
+                            INSERT INTO task_runs (task_id, workflow_id, run_number, phase, started_at, created_at)
+                            VALUES (:task_id, :workflow_id, :run_number, :phase, :started_at, :created_at)
                             RETURNING id
                         """),
                         {
@@ -1317,6 +1388,7 @@ REQ_EOF
                             "workflow_id": workflow_id,
                             "run_number": next_run_number,
                             "phase": "Pending",
+                            "started_at": datetime.utcnow(),
                             "created_at": datetime.utcnow()
                         }
                     )
@@ -1325,23 +1397,24 @@ REQ_EOF
             return {
                 "id": task_id,
                 "workflowId": workflow_id,
-                "runNumber": next_run_number
+                "runNumber": next_run_number,
+                "message": f"Task {task_id} started successfully (run #{next_run_number})"
             }
         except HTTPException:
             db.rollback()
             raise
         except Exception as db_error:
             db.rollback()
-            print(f"Error saving task to database: {db_error}")
-            # Still return workflow_id even if DB save fails
-            return {"id": workflow_id, "workflowId": workflow_id}
+            print(f"Error saving task run to database: {db_error}")
+            raise HTTPException(status_code=500, detail=f"Failed to save task run: {str(db_error)}")
         finally:
             db.close()
+    except HTTPException:
+        raise
     except Exception as e:
         # Print full error for debugging
         import traceback
         traceback.print_exc()
-        # Ensure CORS headers are sent even on error
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/tasks")
@@ -1439,7 +1512,8 @@ async def list_tasks():
                     started_at = run_started_at.isoformat() if run_started_at else ""
                     finished_at = run_finished_at.isoformat() if run_finished_at else ""
             else:
-                phase = "Pending"
+                # No runs yet - task is "Not Started"
+                phase = "Not Started"
                 started_at = ""
                 finished_at = ""
             

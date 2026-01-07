@@ -39,10 +39,11 @@
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
     onRerun: (task: { pythonCode: string; dependencies?: string }, taskId: string) => void;
+    onRun?: (taskId: string) => void;
     onLoadRunLogs?: (taskId: string, runNumber: number) => Promise<void>;
   }
 
-  let { task, activeTab, setActiveTab, taskLogs, loadingLogs, onClose, onCancel, onDelete, onRerun, onLoadRunLogs }: Props = $props();
+  let { task, activeTab, setActiveTab, taskLogs, loadingLogs, onClose, onCancel, onDelete, onRerun, onRun, onLoadRunLogs }: Props = $props();
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
   let runs = $state<Run[]>([]);
@@ -50,6 +51,7 @@
   let loadingRuns = $state(false);
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
+  const canRun = $derived(task.phase !== 'Running' && task.phase !== 'Pending');
   let dialogOpen = $state(true);
   
   // Get the selected run's code and dependencies
@@ -63,6 +65,7 @@
       case 'Failed': return '#ef4444';
       case 'Running': return '#3b82f6';
       case 'Pending': return '#f59e0b';
+      case 'Not Started': return '#9ca3af';
       default: return '#6b7280';
     }
   }
@@ -73,6 +76,7 @@
       case 'Failed': return 'destructive';
       case 'Running': return 'default';
       case 'Pending': return 'secondary';
+      case 'Not Started': return 'outline';
       default: return 'outline';
     }
   }
@@ -137,6 +141,14 @@
       {/if}
     </div>
     <div class="flex gap-2">
+      {#if canRun && onRun}
+        <Button
+          onclick={() => onRun(task.id)}
+          variant="default"
+        >
+          <Play size={16} class="mr-2" /> Run
+        </Button>
+      {/if}
       <Button
         onclick={() => onRerun({ pythonCode: displayCode, dependencies: displayDependencies }, task.id)}
         variant="default"

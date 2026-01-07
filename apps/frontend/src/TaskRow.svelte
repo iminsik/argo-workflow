@@ -3,6 +3,8 @@
   import Button from '$lib/components/ui/button.svelte';
   import Badge from '$lib/components/ui/badge.svelte';
 
+  import { Play } from 'lucide-svelte';
+
   interface Props {
     task: {
       id: string;
@@ -15,11 +17,13 @@
     onTaskClick: (task: any) => void;
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
+    onRun: (taskId: string) => void;
   }
 
-  let { task, getPhaseColor, onTaskClick, onCancel, onDelete }: Props = $props();
+  let { task, getPhaseColor, onTaskClick, onCancel, onDelete, onRun }: Props = $props();
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
+  const canRun = $derived(task.phase !== 'Running' && task.phase !== 'Pending');
 
   function handleCancelClick(e: MouseEvent) {
     e.stopPropagation();
@@ -31,12 +35,18 @@
     onDelete(task.id);
   }
 
+  function handleRunClick(e: MouseEvent) {
+    e.stopPropagation();
+    onRun(task.id);
+  }
+
   function getBadgeVariant(phase: string): 'default' | 'secondary' | 'destructive' | 'outline' {
     switch (phase) {
       case 'Succeeded': return 'default';
       case 'Failed': return 'destructive';
       case 'Running': return 'default';
       case 'Pending': return 'secondary';
+      case 'Not Started': return 'outline';
       default: return 'outline';
     }
   }
@@ -63,6 +73,16 @@
   </td>
   <td class="p-3">
     <div class="flex gap-2 items-center">
+      {#if canRun}
+        <Button
+          onclick={handleRunClick}
+          variant="default"
+          size="sm"
+          title="Run task"
+        >
+          <Play size={14} class="mr-1" /> Run
+        </Button>
+      {/if}
       {#if canCancel}
         <Button
           onclick={handleCancelClick}

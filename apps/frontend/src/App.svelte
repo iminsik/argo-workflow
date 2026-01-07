@@ -89,6 +89,7 @@
       case 'Failed': return '#ef4444';
       case 'Running': return '#3b82f6';
       case 'Pending': return '#f59e0b';
+      case 'Not Started': return '#9ca3af';
       default: return '#6b7280';
     }
   }
@@ -502,23 +503,43 @@
       
       if (!res.ok) {
         const errorData = await res.json();
-        throw new Error(errorData.detail || 'Failed to submit task');
+        throw new Error(errorData.detail || 'Failed to save task');
       }
       
       const data = await res.json();
       if (rerunTaskId) {
-        alert(`Rerun task ${data.id}, run #${data.runNumber}`);
+        alert(`Task ${data.id} saved. Click 'Run' to execute it.`);
       } else {
-        alert('Started Workflow: ' + data.id);
+        alert('Task saved: ' + data.id + '. Click "Run" button to execute it.');
       }
       showSubmitModal = false;
       // pythonCode will be reset by the $effect when showSubmitModal becomes false
       fetchTasks();
     } catch (error) {
-      console.error('Failed to submit task:', error);
-      alert('Failed to submit task: ' + (error instanceof Error ? error.message : 'Unknown error'));
+      console.error('Failed to save task:', error);
+      alert('Failed to save task: ' + (error instanceof Error ? error.message : 'Unknown error'));
     } finally {
       submitting = false;
+    }
+  }
+
+  async function executeTask(taskId: string) {
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/run`, {
+        method: 'POST',
+      });
+      
+      if (!res.ok) {
+        const errorData = await res.json();
+        throw new Error(errorData.detail || 'Failed to run task');
+      }
+      
+      const data = await res.json();
+      alert(`Task ${taskId} started successfully (run #${data.runNumber})`);
+      fetchTasks();
+    } catch (error) {
+      console.error('Failed to run task:', error);
+      alert('Failed to run task: ' + (error instanceof Error ? error.message : 'Unknown error'));
     }
   }
 
@@ -748,6 +769,7 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
                 }}
                 onCancel={cancelTask}
                 onDelete={deleteTask}
+                onRun={executeTask}
               />
             {/each}
           </tbody>
@@ -782,6 +804,7 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
       }}
       onCancel={cancelTask}
       onDelete={deleteTask}
+      onRun={executeTask}
       onRerun={(taskData, taskId) => {
         rerunTaskId = taskId;
         pythonCode = taskData.pythonCode || defaultPythonCode;
@@ -900,7 +923,7 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         disabled={submitting || !pythonCode.trim()}
         variant="default"
       >
-        {submitting ? 'Submitting...' : 'Submit Task'}
+        {submitting ? 'Saving...' : 'Save Task'}
         {#if !submitting}
           <Play size={18} class="ml-2" />
         {/if}
