@@ -13,7 +13,7 @@ import os
 from typing import Optional
 from hera.workflows import Workflow, Script, Container, Parameter
 from hera.workflows.models import VolumeMount, Volume, EnvVar, PersistentVolumeClaimVolumeSource
-from kubernetes.client import CoreV1Api  # type: ignore
+from kubernetes.client import CoreV1Api, CustomObjectsApi  # type: ignore
 from fastapi import HTTPException
 
 
@@ -183,19 +183,51 @@ def create_workflow_with_hera(
         
         workflow.templates.append(container_template)
     
-    # Create the workflow - Hera handles all serialization automatically
+    # Create the workflow using Kubernetes API directly
+    # Hera SDK's create() requires Argo server host, so we build the workflow dict
+    # and submit it via Kubernetes API (same as current implementation)
     try:
-        # Hera SDK creates the workflow and returns the created workflow object
-        created_workflow = workflow.create()
-        # Extract workflow ID from metadata
-        if hasattr(created_workflow, 'metadata') and hasattr(created_workflow.metadata, 'name'):
-            workflow_id = created_workflow.metadata.name
-        else:
-            # Fallback: try to get from dict representation
-            workflow_dict: dict = created_workflow if isinstance(created_workflow, dict) else {}
-            workflow_id = workflow_dict.get('metadata', {}).get('name', 'unknown')
+        # Build workflow object using Hera SDK (handles all serialization)
+        workflow_obj = workflow.build()
         
-        if not workflow_id or workflow_id == 'unknown':
+        # Convert Workflow object to dict for Kubernetes API
+        # Hera SDK 5.26+ uses Pydantic v2, so we use model_dump()
+        if isinstance(workflow_obj, dict):
+            # Already a dict
+            workflow_dict = workflow_obj
+        elif hasattr(workflow_obj, 'model_dump'):
+            # Pydantic v2 - convert to dict with proper serialization
+            workflow_dict = workflow_obj.model_dump(exclude_none=True, by_alias=True, mode='json')
+        elif hasattr(workflow_obj, 'model_dump_json'):
+            # Pydantic v2 - convert via JSON string
+            import json
+            workflow_dict = json.loads(workflow_obj.model_dump_json(exclude_none=True, by_alias=True))
+        elif hasattr(workflow_obj, 'dict'):
+            # Pydantic v1 - convert to dict
+            workflow_dict = workflow_obj.dict(exclude_none=True, by_alias=True)
+        else:
+            # Fallback: try to convert using json
+            import json
+            try:
+                workflow_dict = json.loads(json.dumps(workflow_obj, default=str))
+            except Exception:
+                # Last resort: convert to dict manually
+                workflow_dict = dict(workflow_obj) if hasattr(workflow_obj, '__dict__') else {}
+        
+        # Submit workflow via Kubernetes CustomObjectsApi
+        api_instance = CustomObjectsApi()
+        result = api_instance.create_namespaced_custom_object(
+            group="argoproj.io",
+            version="v1alpha1",
+            namespace=namespace,
+            plural="workflows",
+            body=workflow_dict
+        )
+        
+        # Extract workflow ID from result
+        workflow_id = result.get("metadata", {}).get("name", "unknown")
+        
+        if not workflow_id or workflow_id == "unknown":
             raise HTTPException(
                 status_code=500,
                 detail="Failed to extract workflow ID from created workflow"

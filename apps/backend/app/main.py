@@ -969,83 +969,101 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                     "infrastructure/argo/python-processor.yaml",
                     "WORKFLOW_MANIFEST_PATH"
                 )
+            
+            # Read YAML file
+            with open(workflow_path, "r") as f:
+                manifest_dict = yaml.safe_load(f)
+            
+            # Construct workflow object with proper nested objects
+            # Convert metadata dict to argo_workflows ObjectMeta
+            metadata_dict = manifest_dict.get("metadata", {})
+            metadata = ObjectMeta(**metadata_dict) if metadata_dict else None
+            
+            # Convert spec dict to argo_workflows WorkflowSpec
+            # Need to handle nested templates array and container/script objects
+            spec_dict = manifest_dict.get("spec", {}).copy() if manifest_dict.get("spec") else {}
+            
+            # Extract volumes to add back later (WorkflowSpec validation might fail with dict volumes)
+            volumes = spec_dict.pop("volumes", [])
+            
+            # Check if we have dependencies - if so, we'll work with dicts directly to avoid validation issues
+            has_dependencies = bool(request.dependencies or request.requirementsFile)
+            use_dict_approach = has_dependencies and "script" in str(manifest_dict.get("spec", {}).get("templates", [{}])[0])
         
-        # Read YAML file
-        with open(workflow_path, "r") as f:
-            manifest_dict = yaml.safe_load(f)
-        
-        # Construct workflow object with proper nested objects
-        # Convert metadata dict to argo_workflows ObjectMeta
-        metadata_dict = manifest_dict.get("metadata", {})
-        metadata = ObjectMeta(**metadata_dict) if metadata_dict else None
-        
-        # Convert spec dict to argo_workflows WorkflowSpec
-        # Need to handle nested templates array and container/script objects
-        spec_dict = manifest_dict.get("spec", {}).copy() if manifest_dict.get("spec") else {}
-        
-        # Extract volumes to add back later (WorkflowSpec validation might fail with dict volumes)
-        volumes = spec_dict.pop("volumes", [])
-        
-        # Check if we have dependencies - if so, we'll work with dicts directly to avoid validation issues
-        has_dependencies = bool(request.dependencies or request.requirementsFile)
-        use_dict_approach = has_dependencies and "script" in str(manifest_dict.get("spec", {}).get("templates", [{}])[0])
-        
-        if "templates" in spec_dict and spec_dict["templates"]:
-            if use_dict_approach:
-                # For script templates, work with dicts directly to avoid ScriptTemplate validation issues
-                templates = []
-                for template_dict in spec_dict["templates"]:
-                    template_dict_copy = template_dict.copy()
-                    
-                    if "script" in template_dict_copy and template_dict_copy["script"]:
-                        script_dict = template_dict_copy["script"].copy()
-                        env_vars = script_dict.get("env", [])
+            if "templates" in spec_dict and spec_dict["templates"]:
+                if use_dict_approach:
+                    # For script templates, work with dicts directly to avoid ScriptTemplate validation issues
+                    templates = []
+                    for template_dict in spec_dict["templates"]:
+                        template_dict_copy = template_dict.copy()
                         
-                        # Update PYTHON_CODE env var
-                        for env_var in env_vars:
-                            if env_var.get("name") == "PYTHON_CODE":
-                                env_var["value"] = request.pythonCode
-                                break
-                        else:
-                            env_vars.append({"name": "PYTHON_CODE", "value": request.pythonCode})
-                        
-                        # Update DEPENDENCIES env var and handle requirements file
-                        dependencies_value = ""
-                        if request.requirementsFile:
-                            script_source = script_dict.get("source", "")
-                            requirements_content = request.requirementsFile
-                            requirements_setup = f'''
+                        if "script" in template_dict_copy and template_dict_copy["script"]:
+                            script_dict = template_dict_copy["script"].copy()
+                            env_vars = script_dict.get("env", [])
+                            
+                            # Update PYTHON_CODE env var
+                            for env_var in env_vars:
+                                if env_var.get("name") == "PYTHON_CODE":
+                                    env_var["value"] = request.pythonCode
+                                    break
+                            else:
+                                env_vars.append({"name": "PYTHON_CODE", "value": request.pythonCode})
+                            
+                            # Update DEPENDENCIES env var and handle requirements file
+                            dependencies_value = ""
+                            if request.requirementsFile:
+                                script_source = script_dict.get("source", "")
+                                requirements_content = request.requirementsFile
+                                requirements_setup = f'''
 # Write requirements file
 cat > /tmp/requirements.txt << 'REQ_EOF'
 {requirements_content}
 REQ_EOF
 '''
-                            if 'source "$VENV_DIR/bin/activate"' in script_source:
-                                script_source = script_source.replace(
-                                    'source "$VENV_DIR/bin/activate"',
-                                    f'source "$VENV_DIR/bin/activate"\n{requirements_setup}'
-                                )
-                            script_dict["source"] = script_source
-                            dependencies_value = "requirements.txt"
-                        elif request.dependencies:
-                            dependencies_value = request.dependencies
+                                if 'source "$VENV_DIR/bin/activate"' in script_source:
+                                    script_source = script_source.replace(
+                                        'source "$VENV_DIR/bin/activate"',
+                                        f'source "$VENV_DIR/bin/activate"\n{requirements_setup}'
+                                    )
+                                script_dict["source"] = script_source
+                                dependencies_value = "requirements.txt"
+                            elif request.dependencies:
+                                dependencies_value = request.dependencies
+                            
+                            # Update DEPENDENCIES env var
+                            for env_var in env_vars:
+                                if env_var.get("name") == "DEPENDENCIES":
+                                    env_var["value"] = dependencies_value
+                                    break
+                            else:
+                                env_vars.append({"name": "DEPENDENCIES", "value": dependencies_value})
+                            
+                            script_dict["env"] = env_vars
+                            template_dict_copy["script"] = script_dict
                         
-                        # Update DEPENDENCIES env var
-                        for env_var in env_vars:
-                            if env_var.get("name") == "DEPENDENCIES":
-                                env_var["value"] = dependencies_value
-                                break
+                        # Keep as dict for script templates, convert to Template object for container templates
+                        if "script" in template_dict_copy:
+                            templates.append(template_dict_copy)  # Keep as dict
                         else:
-                            env_vars.append({"name": "DEPENDENCIES", "value": dependencies_value})
+                            # For container templates, use Template object
+                            if "container" in template_dict_copy and template_dict_copy["container"]:
+                                container_dict = template_dict_copy["container"].copy()
+                                volume_mounts = container_dict.get("volumeMounts", [])
+                                env_vars = container_dict.pop("env", [])
+                                if "args" in container_dict and container_dict["args"]:
+                                    container_dict["args"] = [request.pythonCode]
+                                else:
+                                    container_dict["args"] = [request.pythonCode]
+                                template_dict_copy["container"] = Container(**container_dict)
+                                template_dict_copy["_volume_mounts"] = volume_mounts
+                                template_dict_copy["_env"] = env_vars
+                            templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
+                else:
+                    # Original approach for container templates
+                    templates = []
+                    for template_dict in spec_dict["templates"]:
+                        template_dict_copy = template_dict.copy()
                         
-                        script_dict["env"] = env_vars
-                        template_dict_copy["script"] = script_dict
-                    
-                    # Keep as dict for script templates, convert to Template object for container templates
-                    if "script" in template_dict_copy:
-                        templates.append(template_dict_copy)  # Keep as dict
-                    else:
-                        # For container templates, use Template object
                         if "container" in template_dict_copy and template_dict_copy["container"]:
                             container_dict = template_dict_copy["container"].copy()
                             volume_mounts = container_dict.get("volumeMounts", [])
@@ -1057,110 +1075,92 @@ REQ_EOF
                             template_dict_copy["container"] = Container(**container_dict)
                             template_dict_copy["_volume_mounts"] = volume_mounts
                             template_dict_copy["_env"] = env_vars
+                        
                         templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
+                
+                spec_dict["templates"] = templates
+            
+            # If using dict approach for script templates, build workflow dict directly
+            if use_dict_approach:
+                from argo_workflows.api_client import ApiClient  # type: ignore
+                api_client = ApiClient()
+                workflow_dict = {
+                    "apiVersion": manifest_dict.get("apiVersion"),
+                    "kind": manifest_dict.get("kind"),
+                    "metadata": api_client.sanitize_for_serialization(metadata) if metadata else manifest_dict.get("metadata", {}),
+                    "spec": spec_dict
+                }
+                # Add volumes back
+                if volumes:
+                    workflow_dict["spec"]["volumes"] = volumes
             else:
-                # Original approach for container templates
-                templates = []
-                for template_dict in spec_dict["templates"]:
-                    template_dict_copy = template_dict.copy()
-                    
-                    if "container" in template_dict_copy and template_dict_copy["container"]:
-                        container_dict = template_dict_copy["container"].copy()
-                        volume_mounts = container_dict.get("volumeMounts", [])
-                        env_vars = container_dict.pop("env", [])
-                        if "args" in container_dict and container_dict["args"]:
-                            container_dict["args"] = [request.pythonCode]
-                        else:
-                            container_dict["args"] = [request.pythonCode]
-                        template_dict_copy["container"] = Container(**container_dict)
-                        template_dict_copy["_volume_mounts"] = volume_mounts
-                        template_dict_copy["_env"] = env_vars
-                    
-                    templates.append(IoArgoprojWorkflowV1alpha1Template(**template_dict_copy))
+                spec = IoArgoprojWorkflowV1alpha1WorkflowSpec(**spec_dict) if spec_dict else None
+                
+                # Construct workflow object with proper types
+                workflow = IoArgoprojWorkflowV1alpha1Workflow(
+                    api_version=manifest_dict.get("apiVersion"),
+                    kind=manifest_dict.get("kind"),
+                    metadata=metadata,
+                    spec=spec
+                )
+                
+                # Convert workflow object to dict for Kubernetes API
+                # Use the ApiClient to serialize the workflow object
+                from argo_workflows.api_client import ApiClient
+                api_client = ApiClient()
+                workflow_dict = api_client.sanitize_for_serialization(workflow)
+                
+                # Add volumes back to the workflow dict
+                if volumes:
+                    if "spec" not in workflow_dict:
+                        workflow_dict["spec"] = {}
+                    workflow_dict["spec"]["volumes"] = volumes
             
-            spec_dict["templates"] = templates
-        
-        # If using dict approach for script templates, build workflow dict directly
-        if use_dict_approach:
-            from argo_workflows.api_client import ApiClient  # type: ignore
-            api_client = ApiClient()
-            workflow_dict = {
-                "apiVersion": manifest_dict.get("apiVersion"),
-                "kind": manifest_dict.get("kind"),
-                "metadata": api_client.sanitize_for_serialization(metadata) if metadata else manifest_dict.get("metadata", {}),
-                "spec": spec_dict
-            }
-            # Add volumes back
-            if volumes:
-                workflow_dict["spec"]["volumes"] = volumes
-        else:
-            spec = IoArgoprojWorkflowV1alpha1WorkflowSpec(**spec_dict) if spec_dict else None
-            
-            # Construct workflow object with proper types
-            workflow = IoArgoprojWorkflowV1alpha1Workflow(
-                api_version=manifest_dict.get("apiVersion"),
-                kind=manifest_dict.get("kind"),
-                metadata=metadata,
-                spec=spec
-            )
-            
-            # Convert workflow object to dict for Kubernetes API
-            # Use the ApiClient to serialize the workflow object
-            from argo_workflows.api_client import ApiClient
-            api_client = ApiClient()
-            workflow_dict = api_client.sanitize_for_serialization(workflow)
-            
-            # Add volumes back to the workflow dict
-            if volumes:
-                if "spec" not in workflow_dict:
-                    workflow_dict["spec"] = {}
-                workflow_dict["spec"]["volumes"] = volumes
-        
-        # Ensure volumeMounts and env are preserved in the container/script
-        # The Container/Script object might not serialize volumeMounts/env, so we add them back
-        if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
-            for i, template in enumerate(workflow_dict["spec"]["templates"]):
-                original_template = manifest_dict.get("spec", {}).get("templates", [])
-                if original_template and i < len(original_template):
-                    original_template_item = original_template[i]
-                    
-                    # Handle container template
-                    if "container" in template and "container" in original_template_item:
-                        original_container = original_template_item.get("container", {})
-                        original_volume_mounts = original_container.get("volumeMounts", [])
-                        original_env = original_container.get("env", [])
-                        if original_volume_mounts:
-                            # Always add volumeMounts back (they might be missing after serialization)
-                            template["container"]["volumeMounts"] = original_volume_mounts
-                        if original_env:
-                            # Always add env back (they might be missing after serialization)
-                            template["container"]["env"] = original_env
-                    
-                    # Handle script template
-                    elif "script" in template and "script" in original_template_item:
-                        original_script = original_template_item.get("script", {})
-                        original_volume_mounts = original_script.get("volumeMounts", [])
-                        original_env = original_script.get("env", [])
+            # Ensure volumeMounts and env are preserved in the container/script
+            # The Container/Script object might not serialize volumeMounts/env, so we add them back
+            if "spec" in workflow_dict and "templates" in workflow_dict["spec"]:
+                for i, template in enumerate(workflow_dict["spec"]["templates"]):
+                    original_template = manifest_dict.get("spec", {}).get("templates", [])
+                    if original_template and i < len(original_template):
+                        original_template_item = original_template[i]
                         
-                        # After serialization, script is already a dict, ensure volumeMounts are present
-                        if original_volume_mounts and "volumeMounts" not in template.get("script", {}):
-                            template["script"]["volumeMounts"] = original_volume_mounts
+                        # Handle container template
+                        if "container" in template and "container" in original_template_item:
+                            original_container = original_template_item.get("container", {})
+                            original_volume_mounts = original_container.get("volumeMounts", [])
+                            original_env = original_container.get("env", [])
+                            if original_volume_mounts:
+                                # Always add volumeMounts back (they might be missing after serialization)
+                                template["container"]["volumeMounts"] = original_volume_mounts
+                            if original_env:
+                                # Always add env back (they might be missing after serialization)
+                                template["container"]["env"] = original_env
                         
-                        # For script templates, we've already updated env vars, but ensure they're preserved
-                        if original_env:
-                            # Convert to dict if needed
-                            if not isinstance(template["script"], dict):
-                                from argo_workflows.api_client import ApiClient
-                                api_client = ApiClient()
-                                template["script"] = api_client.sanitize_for_serialization(template["script"])
+                        # Handle script template
+                        elif "script" in template and "script" in original_template_item:
+                            original_script = original_template_item.get("script", {})
+                            original_volume_mounts = original_script.get("volumeMounts", [])
+                            original_env = original_script.get("env", [])
                             
-                            # Merge with our updated env vars
-                            existing_env_names = {env.get("name") for env in template.get("script", {}).get("env", [])}
-                            for env_var in original_env:
-                                if env_var.get("name") not in existing_env_names:
-                                    if "env" not in template["script"]:
-                                        template["script"]["env"] = []
-                                    template["script"]["env"].append(env_var)
+                            # After serialization, script is already a dict, ensure volumeMounts are present
+                            if original_volume_mounts and "volumeMounts" not in template.get("script", {}):
+                                template["script"]["volumeMounts"] = original_volume_mounts
+                            
+                            # For script templates, we've already updated env vars, but ensure they're preserved
+                            if original_env:
+                                # Convert to dict if needed
+                                if not isinstance(template["script"], dict):
+                                    from argo_workflows.api_client import ApiClient
+                                    api_client = ApiClient()
+                                    template["script"] = api_client.sanitize_for_serialization(template["script"])
+                                
+                                # Merge with our updated env vars
+                                existing_env_names = {env.get("name") for env in template.get("script", {}).get("env", [])}
+                                for env_var in original_env:
+                                    if env_var.get("name") not in existing_env_names:
+                                        if "env" not in template["script"]:
+                                            template["script"]["env"] = []
+                                        template["script"]["env"].append(env_var)
         
             # Create workflow using Kubernetes CustomObjectsApi
             # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
