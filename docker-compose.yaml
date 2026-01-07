@@ -22,6 +22,8 @@ services:
     ports: ["8000:8000"]
     environment:
       - DATABASE_URL=postgresql://postgres:password@postgres:5432/postgres
+      # Hera SDK configuration (default: true - use Hera SDK, set to false for legacy YAML-based)
+      - USE_HERA_SDK=${USE_HERA_SDK:-true}
       # Kubernetes cluster configuration
       # Options: "auto" (default, auto-detect), "kind" (local KinD), "eks" (AWS EKS), "external" (other external cluster)
       - KUBERNETES_CLUSTER_TYPE=${KUBERNETES_CLUSTER_TYPE:-auto}
