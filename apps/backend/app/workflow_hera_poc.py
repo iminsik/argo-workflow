@@ -1,12 +1,12 @@
 """
-Proof of Concept: Workflow Creation with Hera SDK
+Workflow Creation with Hera SDK
 
-This module demonstrates how workflow creation can be simplified using Hera SDK
-compared to the current YAML template manipulation approach.
+This module provides workflow creation functionality using Hera SDK,
+simplifying the process compared to YAML template manipulation.
 
-To use this POC:
+Usage:
 1. Install hera-workflows: pip install hera-workflows
-2. Replace the workflow creation logic in start_task() with create_workflow_with_hera()
+2. Use create_workflow_with_hera() in your workflow creation logic
 """
 
 import os
