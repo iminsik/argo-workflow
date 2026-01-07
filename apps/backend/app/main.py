@@ -27,6 +27,18 @@ try:
 except ImportError:
     VolumeMount = None
 
+# Hera SDK integration (feature flag controlled)
+USE_HERA_SDK = os.getenv("USE_HERA_SDK", "false").lower() == "true"
+if USE_HERA_SDK:
+    try:
+        from app.workflow_hera_poc import create_workflow_with_hera
+        HERA_AVAILABLE = True
+    except ImportError as e:
+        print(f"Warning: Hera SDK requested but not available: {e}. Falling back to current implementation.")
+        HERA_AVAILABLE = False
+else:
+    HERA_AVAILABLE = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -101,18 +113,28 @@ except:
     )
     
     if should_patch_kind:
+        # Check if we're running inside Docker
+        # Only patch to host.docker.internal if running inside Docker
+        running_in_docker = os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true'
+        
         # Patch configuration for Docker: replace 127.0.0.1 with host.docker.internal
         # and disable SSL verification for development (kind uses self-signed certs)
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        
         if configuration.host and ('127.0.0.1' in configuration.host or 'localhost' in configuration.host):
-            # Replace both 127.0.0.1 and localhost with host.docker.internal
-            configuration.host = configuration.host.replace('127.0.0.1', 'host.docker.internal')
-            configuration.host = configuration.host.replace('localhost', 'host.docker.internal')
+            if running_in_docker:
+                # Replace both 127.0.0.1 and localhost with host.docker.internal (only when in Docker)
+                configuration.host = configuration.host.replace('127.0.0.1', 'host.docker.internal')
+                configuration.host = configuration.host.replace('localhost', 'host.docker.internal')
+                print("Applied KinD-specific configuration patches (localhost -> host.docker.internal) for Docker")
+            else:
+                # Running locally, keep localhost but disable SSL verification for KinD
+                print("Running locally, using localhost for KinD cluster")
+            
             # Disable SSL verification for development (kind uses self-signed certs)
             configuration.verify_ssl = False
             Configuration.set_default(configuration)
-            print("Applied KinD-specific configuration patches (localhost -> host.docker.internal)")
     elif KUBERNETES_CLUSTER_TYPE in ("eks", "external"):
         # For external clusters (EKS, etc.), use standard configuration
         print(f"Using external Kubernetes cluster configuration (type: {KUBERNETES_CLUSTER_TYPE})")
@@ -873,19 +895,80 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
             # Otherwise log and continue (might be a transient issue)
             print(f"Warning: Could not verify PVC status: {pvc_error}")
         
-        # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
-        api_instance = CustomObjectsApi()
+        # Feature flag: Use Hera SDK if enabled and available
+        use_hera_for_this_request = USE_HERA_SDK and HERA_AVAILABLE
+        workflow_id = None
         
-        # Choose workflow template based on whether dependencies are provided
-        has_dependencies = bool(request.dependencies or request.requirementsFile)
-        if has_dependencies:
-            deps_template_path = "/infrastructure/argo/python-processor-with-deps.yaml"
-            workflow_path = os.getenv("WORKFLOW_MANIFEST_PATH_DEPS", deps_template_path)
-            # Fallback to default if deps template doesn't exist
-            if not os.path.exists(workflow_path):
-                workflow_path = os.getenv("WORKFLOW_MANIFEST_PATH", "/infrastructure/argo/python-processor.yaml")
-        else:
-            workflow_path = os.getenv("WORKFLOW_MANIFEST_PATH", "/infrastructure/argo/python-processor.yaml")
+        if use_hera_for_this_request:
+            # Create workflow using Hera SDK (simplified approach)
+            try:
+                workflow_id = create_workflow_with_hera(
+                    python_code=request.pythonCode,
+                    dependencies=request.dependencies,
+                    requirements_file=request.requirementsFile,
+                    namespace=namespace
+                )
+            except HTTPException:
+                raise
+            except Exception as hera_error:
+                # If Hera fails, log and fall back to current implementation
+                print(f"Warning: Hera SDK workflow creation failed: {hera_error}. Falling back to current implementation.")
+                use_hera_for_this_request = False  # Fall back for this request
+        
+        # Current implementation (used when Hera SDK is disabled or fails)
+        if not use_hera_for_this_request:
+            # Use Kubernetes CustomObjectsApi to create Workflow CRD directly
+            api_instance = CustomObjectsApi()
+            
+            # Choose workflow template based on whether dependencies are provided
+            has_dependencies = bool(request.dependencies or request.requirementsFile)
+            
+            # Determine workflow template path
+            # Try absolute path first (for Docker), then relative path (for local dev)
+            def find_workflow_template(default_absolute_path: str, default_relative_path: str, env_var_name: str | None = None) -> str:
+                """Find workflow template, trying absolute path first, then relative."""
+                # Check environment variable first
+                if env_var_name:
+                    env_path = os.getenv(env_var_name)
+                    if env_path and os.path.exists(env_path):
+                        return env_path
+                
+                # Try absolute path (Docker/production)
+                if os.path.exists(default_absolute_path):
+                    return default_absolute_path
+                
+                # Try relative path from project root (local development)
+                # Get project root (assuming we're in apps/backend/app/)
+                current_file = os.path.abspath(__file__)
+                backend_dir = os.path.dirname(os.path.dirname(current_file))  # apps/backend
+                project_root = os.path.dirname(os.path.dirname(backend_dir))  # project root
+                relative_path = os.path.join(project_root, default_relative_path)
+                
+                if os.path.exists(relative_path):
+                    return relative_path
+                
+                # If neither exists, return the absolute path (will fail with clear error)
+                return default_absolute_path
+            
+            if has_dependencies:
+                workflow_path = find_workflow_template(
+                    "/infrastructure/argo/python-processor-with-deps.yaml",
+                    "infrastructure/argo/python-processor-with-deps.yaml",
+                    "WORKFLOW_MANIFEST_PATH_DEPS"
+                )
+                # Fallback to simple template if deps template doesn't exist
+                if not os.path.exists(workflow_path):
+                    workflow_path = find_workflow_template(
+                        "/infrastructure/argo/python-processor.yaml",
+                        "infrastructure/argo/python-processor.yaml",
+                        "WORKFLOW_MANIFEST_PATH"
+                    )
+            else:
+                workflow_path = find_workflow_template(
+                    "/infrastructure/argo/python-processor.yaml",
+                    "infrastructure/argo/python-processor.yaml",
+                    "WORKFLOW_MANIFEST_PATH"
+                )
         
         # Read YAML file
         with open(workflow_path, "r") as f:
@@ -1079,18 +1162,17 @@ REQ_EOF
                                         template["script"]["env"] = []
                                     template["script"]["env"].append(env_var)
         
-        # Create workflow using Kubernetes CustomObjectsApi
-        # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
-        namespace = os.getenv("ARGO_NAMESPACE", "argo")
-        result = api_instance.create_namespaced_custom_object(
-            group="argoproj.io",
-            version="v1alpha1",
-            namespace=namespace,
-            plural="workflows",
-            body=workflow_dict
-        )
-        
-        workflow_id = result.get("metadata", {}).get("name", "unknown")
+            # Create workflow using Kubernetes CustomObjectsApi
+            # Use 'argo' namespace where workflow controller is watching (--namespaced mode)
+            result = api_instance.create_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                body=workflow_dict
+            )
+            
+            workflow_id = result.get("metadata", {}).get("name", "unknown")
         
         # Create/update Task and TaskRun in database
         db = next(get_db())
