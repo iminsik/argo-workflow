@@ -10,7 +10,7 @@ The actual integration is in main.py with proper error handling.
 
 # Example imports (these would be in the actual main.py)
 from fastapi import FastAPI, HTTPException  # type: ignore
-from app.workflow_hera_poc import create_workflow_with_hera  # type: ignore
+from app.workflow_hera import create_workflow_with_hera  # type: ignore
 from app.database import get_db, Task, TaskRun  # type: ignore
 from datetime import datetime
 import uuid

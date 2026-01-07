@@ -4,7 +4,7 @@ This directory contains a proof-of-concept implementation demonstrating how the 
 
 ## Files
 
-- **`workflow_hera_poc.py`**: Main POC implementation showing how to create workflows with Hera SDK
+- **`workflow_hera.py`**: Main POC implementation showing how to create workflows with Hera SDK
 - **`workflow_hera_integration_example.py`**: Example showing how to integrate Hera into the existing endpoint
 - **`workflow_hera_comparison.md`**: Side-by-side comparison of current vs Hera implementation
 - **`README_HERA_POC.md`**: This file
@@ -23,7 +23,7 @@ pip install hera-workflows
 ### 2. Test the POC
 
 ```python
-from app.workflow_hera_poc import create_workflow_with_hera
+from app.workflow_hera import create_workflow_with_hera
 
 # Simple workflow (no dependencies)
 workflow_id = create_workflow_with_hera(
@@ -73,7 +73,7 @@ dependencies = [
 
 ### Phase 2: Test POC in Development
 
-1. Use `workflow_hera_poc.py` in a development environment
+1. Use `workflow_hera.py` in a development environment
 2. Test with various scenarios (with/without dependencies, requirements file)
 3. Verify generated workflows match current behavior
 4. Compare workflow execution results

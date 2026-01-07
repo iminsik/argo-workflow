@@ -77,7 +77,7 @@ Setting `USE_HERA_SDK=true` doesn't seem to have any effect.
 
 ### Problem
 ```
-ImportError: cannot import name 'create_workflow_with_hera' from 'app.workflow_hera_poc'
+ImportError: cannot import name 'create_workflow_with_hera' from 'app.workflow_hera'
 ```
 
 ### Solution
@@ -93,7 +93,7 @@ ImportError: cannot import name 'create_workflow_with_hera' from 'app.workflow_h
    ```
 
 3. **Check the import path:**
-   Make sure `workflow_hera_poc.py` is in `app/` directory.
+   Make sure `workflow_hera.py` is in `app/` directory.
 
 ---
 

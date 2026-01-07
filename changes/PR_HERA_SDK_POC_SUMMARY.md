@@ -14,7 +14,7 @@ A complete proof-of-concept implementation demonstrating how the Hera SDK can si
 - Risk assessment
 
 ### 2. POC Implementation
-**`apps/backend/app/workflow_hera_poc.py`**
+**`apps/backend/app/workflow_hera.py`**
 - Complete working implementation using Hera SDK
 - `create_workflow_with_hera()` function
 - `build_script_source()` helper function
@@ -124,7 +124,7 @@ dependencies = [
 ```
 
 ### Phase 2: Test POC
-- Use `workflow_hera_poc.py` in development
+- Use `workflow_hera.py` in development
 - Verify workflow creation works
 - Compare with current implementation
 
@@ -157,7 +157,7 @@ The POC includes:
 ## Documentation
 
 - **Analysis**: `changes/PR_HERA_SDK_ANALYSIS.md`
-- **POC Code**: `apps/backend/app/workflow_hera_poc.py`
+- **POC Code**: `apps/backend/app/workflow_hera.py`
 - **Comparison**: `apps/backend/app/workflow_hera_comparison.md`
 - **Integration**: `apps/backend/app/workflow_hera_integration_example.py`
 - **README**: `apps/backend/app/README_HERA_POC.md`

@@ -18,7 +18,6 @@ from fastapi import HTTPException
 
 
 def build_script_source(
-    python_code: str,
     dependencies: Optional[str] = None,
     requirements_file: Optional[str] = None
 ) -> str:
@@ -26,6 +25,9 @@ def build_script_source(
     Build the bash script source for executing Python code with optional dependencies.
     
     This replaces the complex YAML template manipulation and requirements file injection.
+    
+    Note: The Python code is passed via the PYTHON_CODE environment variable,
+    which is set separately when creating the workflow template.
     """
     script_parts = [
         "set -e",
@@ -67,6 +69,7 @@ def build_script_source(
         ])
     
     # Execute Python code
+    # Note: $PYTHON_CODE is set as an environment variable in create_workflow_with_hera()
     script_parts.extend([
         "",
         "# Execute Python code",
@@ -151,7 +154,6 @@ def create_workflow_with_hera(
         env_vars.append(EnvVar(name="DEPENDENCIES", value=dependencies_value))
         
         script_source = build_script_source(
-            python_code=python_code,
             dependencies=dependencies,
             requirements_file=requirements_file
         )

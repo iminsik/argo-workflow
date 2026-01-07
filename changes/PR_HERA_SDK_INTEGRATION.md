@@ -19,7 +19,7 @@ Successfully integrated Hera SDK into the backend with a feature flag for gradua
 - Automatic fallback to current implementation if Hera fails
 
 ### 3. POC Implementation
-**File:** `apps/backend/app/workflow_hera_poc.py`
+**File:** `apps/backend/app/workflow_hera.py`
 - Complete Hera SDK implementation
 - Handles all current features (dependencies, requirements file, volumes, etc.)
 
@@ -135,7 +135,7 @@ diff current-workflow.yaml hera-workflow.yaml
 2. `apps/backend/app/main.py` - Added feature flag and conditional logic
 
 ### New Files
-1. `apps/backend/app/workflow_hera_poc.py` - Hera SDK implementation
+1. `apps/backend/app/workflow_hera.py` - Hera SDK implementation
 
 ### No Breaking Changes
 - Default behavior unchanged (Hera SDK disabled by default)
@@ -162,7 +162,7 @@ diff current-workflow.yaml hera-workflow.yaml
 
 ## Troubleshooting
 
-### Issue: "Cannot find implementation or library stub for module named 'app.workflow_hera_poc'"
+### Issue: "Cannot find implementation or library stub for module named 'app.workflow_hera'"
 **Solution:** This is a type checker warning. Install hera-workflows (`poetry install` or `pip install hera-workflows>=5.0.0`) and the error will resolve. The code will work at runtime.
 
 ### Issue: Poetry lock fails with version solving error
@@ -215,7 +215,7 @@ diff current-workflow.yaml hera-workflow.yaml
 
 ## Documentation
 
-- POC Implementation: `apps/backend/app/workflow_hera_poc.py`
+- POC Implementation: `apps/backend/app/workflow_hera.py`
 - POC README: `apps/backend/app/README_HERA_POC.md`
 - Analysis: `changes/PR_HERA_SDK_ANALYSIS.md`
 - Comparison: `apps/backend/app/workflow_hera_comparison.md`

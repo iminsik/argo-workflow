@@ -12,7 +12,7 @@ from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal  
 
 # Hera SDK integration (required)
 try:
-    from app.workflow_hera_poc import create_workflow_with_hera  # type: ignore
+    from app.workflow_hera import create_workflow_with_hera  # type: ignore
 except ImportError as e:
     raise ImportError(f"Hera SDK is required but not available: {e}. Please install hera: poetry add hera")
 

@@ -263,7 +263,7 @@ async def start_task(request: TaskSubmitRequest = TaskSubmitRequest()):
    ```
 
 2. **Test POC:**
-   - Use `workflow_hera_poc.py` in a test environment
+   - Use `workflow_hera.py` in a test environment
    - Verify workflow creation works correctly
    - Compare generated workflows with current approach
 
