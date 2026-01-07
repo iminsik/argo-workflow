@@ -18,7 +18,7 @@ except ImportError as e:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(_app: FastAPI):
     # Startup
     try:
         init_db()
