@@ -3,24 +3,32 @@ Example: How to integrate Hera SDK into the existing start_task endpoint
 
 This shows a minimal change to replace the complex workflow creation
 with the Hera SDK implementation.
+
+NOTE: This is example/documentation code only. It is not meant to be executed directly.
+The actual integration is in main.py with proper error handling.
 """
 
-from fastapi import FastAPI, HTTPException
-from app.workflow_hera_poc import create_workflow_with_hera
-from app.database import get_db, Task, TaskRun
+# Example imports (these would be in the actual main.py)
+from fastapi import FastAPI, HTTPException  # type: ignore
+from app.workflow_hera_poc import create_workflow_with_hera  # type: ignore
+from app.database import get_db, Task, TaskRun  # type: ignore
 from datetime import datetime
 import uuid
 import os
 
-
-# This is how the start_task endpoint would look with Hera SDK
-@app.post("/api/v1/tasks/submit")
-async def start_task_with_hera(request: TaskSubmitRequest = TaskSubmitRequest()):
+# Example endpoint (this is pseudocode showing the integration pattern)
+# In the actual implementation, this code is integrated into main.py's start_task()
+# 
+# @app.post("/api/v1/tasks/submit")
+# async def start_task_with_hera(request: TaskSubmitRequest = TaskSubmitRequest()):
+def example_start_task_with_hera(request):  # type: ignore
     """
     Simplified start_task endpoint using Hera SDK.
     
     This replaces ~270 lines of complex YAML template manipulation
     with a clean function call.
+    
+    NOTE: This is example code. See main.py for the actual implementation.
     """
     try:
         # Validation (unchanged from current implementation)

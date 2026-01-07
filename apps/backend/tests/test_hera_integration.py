@@ -19,10 +19,10 @@ import os
 import sys
 import time
 import argparse
-import requests
+import requests  # type: ignore
 from typing import Dict, Any, Optional
-from kubernetes.client import CustomObjectsApi
-from kubernetes import config
+from kubernetes.client import CustomObjectsApi  # type: ignore
+from kubernetes import config  # type: ignore
 
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -201,7 +201,7 @@ def run_tests(api_url: str, use_hera: bool, test_name: str) -> Dict[str, Any]:
     print(f"Feature Flag (USE_HERA_SDK): {use_hera}")
     print(f"{'#'*60}")
     
-    results = {
+    results: Dict[str, Any] = {
         "test_name": test_name,
         "use_hera": use_hera,
         "tests": {}
@@ -209,22 +209,23 @@ def run_tests(api_url: str, use_hera: bool, test_name: str) -> Dict[str, Any]:
     
     # Test 1: Simple workflow
     result1 = test_simple_workflow(api_url, test_name)
-    results["tests"]["simple"] = result1
+    results["tests"]["simple"] = result1  # type: ignore
     
     # Test 2: Workflow with dependencies
     result2 = test_workflow_with_dependencies(api_url, test_name)
-    results["tests"]["with_dependencies"] = result2
+    results["tests"]["with_dependencies"] = result2  # type: ignore
     
     # Test 3: Workflow with requirements file
     result3 = test_workflow_with_requirements_file(api_url, test_name)
-    results["tests"]["with_requirements"] = result3
+    results["tests"]["with_requirements"] = result3  # type: ignore
     
     # Summary
     print(f"\n{'='*60}")
     print(f"Test Summary for {test_name}")
     print(f"{'='*60}")
-    passed = sum(1 for t in results["tests"].values() if t.get("success"))
-    total = len(results["tests"])
+    tests_dict: Dict[str, Any] = results.get("tests", {})  # type: ignore
+    passed = sum(1 for t in tests_dict.values() if isinstance(t, dict) and t.get("success"))
+    total = len(tests_dict)
     print(f"Passed: {passed}/{total}")
     
     return results

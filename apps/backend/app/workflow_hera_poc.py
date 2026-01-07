@@ -12,9 +12,8 @@ To use this POC:
 import os
 from typing import Optional
 from hera.workflows import Workflow, Script, Container, Parameter
-from hera.shared import VolumeMount, Volume
-from hera.workflows.models import EnvVar
-from kubernetes.client import CoreV1Api
+from hera.workflows.models import VolumeMount, Volume, EnvVar, PersistentVolumeClaimVolumeSource
+from kubernetes.client import CoreV1Api  # type: ignore
 from fastapi import HTTPException
 
 
@@ -135,7 +134,7 @@ def create_workflow_with_hera(
         volumes=[
             Volume(
                 name="task-results",
-                persistent_volume_claim={"claimName": "task-results-pvc"}
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
             )
         ]
     )
@@ -168,7 +167,7 @@ def create_workflow_with_hera(
             ]
         )
         
-        workflow.add_template(script_template)
+        workflow.templates.append(script_template)
     else:
         # Use container template for simple execution (no dependencies)
         container_template = Container(
@@ -182,15 +181,26 @@ def create_workflow_with_hera(
             ]
         )
         
-        workflow.add_template(container_template)
+        workflow.templates.append(container_template)
     
     # Create the workflow - Hera handles all serialization automatically
     try:
         # Hera SDK creates the workflow and returns the created workflow object
         created_workflow = workflow.create()
         # Extract workflow ID from metadata
-        workflow_id = created_workflow.metadata.name if hasattr(created_workflow, 'metadata') else created_workflow.get('metadata', {}).get('name', 'unknown')
-        return workflow_id
+        if hasattr(created_workflow, 'metadata') and hasattr(created_workflow.metadata, 'name'):
+            workflow_id = created_workflow.metadata.name
+        else:
+            # Fallback: try to get from dict representation
+            workflow_dict: dict = created_workflow if isinstance(created_workflow, dict) else {}
+            workflow_id = workflow_dict.get('metadata', {}).get('name', 'unknown')
+        
+        if not workflow_id or workflow_id == 'unknown':
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to extract workflow ID from created workflow"
+            )
+        return str(workflow_id)
     except Exception as e:
         import traceback
         traceback.print_exc()

@@ -31,7 +31,7 @@ except ImportError:
 USE_HERA_SDK = os.getenv("USE_HERA_SDK", "false").lower() == "true"
 if USE_HERA_SDK:
     try:
-        from app.workflow_hera_poc import create_workflow_with_hera
+        from app.workflow_hera_poc import create_workflow_with_hera  # type: ignore
         HERA_AVAILABLE = True
     except ImportError as e:
         print(f"Warning: Hera SDK requested but not available: {e}. Falling back to current implementation.")
