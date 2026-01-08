@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SvelteFlow, Background, Controls, MiniMap, useSvelteFlow } from '@xyflow/svelte';
+  import { SvelteFlow, Background, Controls, MiniMap } from '@xyflow/svelte';
   import type { Node, Edge, Connection } from '@xyflow/svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import Button from '$lib/components/ui/button.svelte';
@@ -156,8 +156,31 @@
   }
 
   function onNodeDoubleClick(event: any) {
+    console.log('onNodeDoubleClick called with event:', event);
     // Double-click also opens editor (alternative to single click)
-    onNodeClick(event);
+    // Extract node from event - @xyflow/svelte may pass it differently
+    const node = event.detail?.node || event.node || (event.detail && typeof event.detail === 'object' && 'id' in event.detail ? event.detail : null);
+    
+    if (!node || !node.id) {
+      console.warn('onNodeDoubleClick: Invalid node in event', event);
+      return;
+    }
+    
+    // Find the node in our nodes array to get the latest data
+    const nodeInState = nodes.find(n => n.id === node.id);
+    const nodeData = nodeInState?.data || node.data || {};
+    
+    console.log('onNodeDoubleClick: Opening editor for node', node.id, 'data:', nodeData);
+    
+    // Update all state synchronously
+    selectedNodeId = node.id;
+    currentStepId = node.id;
+    currentStepName = nodeData.label || nodeData.name || `Step ${node.id}`;
+    currentStepCode = nodeData.pythonCode || "print('Hello from step')";
+    currentStepDependencies = nodeData.dependencies || '';
+    
+    // Open the editor panel
+    showStepEditor = true;
   }
 
   function onNodesDelete(deleted: Node[]) {
@@ -228,47 +251,44 @@
         targetHandle: edge.targetHandle,
       }));
 
+      // Always save via API first
+      const method = savedFlowId || flowId ? 'PUT' : 'POST';
+      const url = savedFlowId || flowId
+        ? `${apiUrl}/api/v1/flows/${savedFlowId || flowId}`
+        : `${apiUrl}/api/v1/flows`;
+
+      const body = {
+        name: flowNameInput,
+        steps: flowSteps,
+        edges: flowEdges,
+      };
+
+      const res = await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.detail || 'Failed to save flow');
+      }
+
+      const saved = await res.json();
+      savedFlowId = saved.id;
+      
+      // Call onSave callback if provided (to refresh the flow list)
       if (onSave) {
-        onSave({
+        await onSave({
           name: flowNameInput,
           steps: flowSteps,
           edges: flowEdges,
         });
-      } else {
-        // Save via API
-        const method = flowId ? 'PUT' : 'POST';
-        const url = flowId 
-          ? `${apiUrl}/api/v1/flows/${flowId}`
-          : `${apiUrl}/api/v1/flows`;
-
-        const body = {
-          name: flowNameInput,
-          steps: flowSteps,
-          edges: flowEdges,
-        };
-
-        const res = await fetch(url, {
-          method,
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-        });
-
-        if (!res.ok) {
-          const error = await res.json();
-          throw new Error(error.detail || 'Failed to save flow');
-        }
-
-        const saved = await res.json();
-        savedFlowId = saved.id;
-        alert(`Flow saved successfully: ${saved.id}`);
-        if (onSave) {
-          await onSave({
-            name: flowNameInput,
-            steps: flowSteps,
-            edges: flowEdges,
-          });
-        }
-        if (onClose) onClose();
+      }
+      
+      // Close the dialog
+      if (onClose) {
+        onClose();
       }
     } catch (error) {
       console.error('Failed to save flow:', error);
