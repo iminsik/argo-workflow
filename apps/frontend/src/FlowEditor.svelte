@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SvelteFlow, Background, Controls, MiniMap } from '@xyflow/svelte';
+  import { SvelteFlow, Background, Controls, MiniMap, useSvelteFlow } from '@xyflow/svelte';
   import type { Node, Edge, Connection } from '@xyflow/svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import Button from '$lib/components/ui/button.svelte';
@@ -55,7 +55,7 @@
     if (flowId) {
       await loadFlow(flowId);
     } else {
-      // Create initial node
+      // Create initial node - this will auto-open the editor
       addNode();
     }
   });
@@ -121,19 +121,38 @@
   }
 
   function onNodeClick(event: any) {
-    // Handle both event formats from @xyflow/svelte
-    const node = event.detail?.node || event.node || event;
-    if (node && node.id) {
-      // Update all state
-      selectedNodeId = node.id;
-      currentStepId = node.id;
-      currentStepName = node.data?.label || `Step ${node.id}`;
-      currentStepCode = node.data?.pythonCode || "print('Hello from step')";
-      currentStepDependencies = node.data?.dependencies || '';
-      
-      // Open the editor panel
-      showStepEditor = true;
+    console.log('onNodeClick called with event:', event);
+    console.log('Event type:', typeof event);
+    console.log('Event detail:', event.detail);
+    console.log('Event keys:', Object.keys(event));
+    
+    // @xyflow/svelte can pass the node in different ways:
+    // - As event.detail.node (CustomEvent)
+    // - As event.node (direct property)
+    // - As event.detail itself (if it's the node)
+    const node = event.detail?.node || event.node || (event.detail && typeof event.detail === 'object' && 'id' in event.detail ? event.detail : null);
+    
+    if (!node || !node.id) {
+      console.warn('onNodeClick: Invalid node in event', event);
+      console.warn('Trying to extract node from event.detail:', event.detail);
+      return;
     }
+    
+    // Find the node in our nodes array to get the latest data
+    const nodeInState = nodes.find(n => n.id === node.id);
+    const nodeData = nodeInState?.data || node.data || {};
+    
+    console.log('onNodeClick: Opening editor for node', node.id, 'data:', nodeData);
+    
+    // Update all state synchronously
+    selectedNodeId = node.id;
+    currentStepId = node.id;
+    currentStepName = nodeData.label || nodeData.name || `Step ${node.id}`;
+    currentStepCode = nodeData.pythonCode || "print('Hello from step')";
+    currentStepDependencies = nodeData.dependencies || '';
+    
+    // Open the editor panel
+    showStepEditor = true;
   }
 
   function onNodeDoubleClick(event: any) {
@@ -335,10 +354,13 @@
       <SvelteFlow
         {nodes}
         {edges}
-        on:nodeclick={onNodeClick}
-        on:nodedoubleclick={onNodeDoubleClick}
-        on:nodesdelete={onNodesDelete}
-        on:connect={onConnect}
+        nodesSelectable={true}
+        nodesDraggable={true}
+        nodesConnectable={true}
+        onnodeclick={onNodeClick}
+        onnodedoubleclick={onNodeDoubleClick}
+        onnodesdelete={onNodesDelete}
+        onconnect={onConnect}
         fitView
       >
         <Background />
