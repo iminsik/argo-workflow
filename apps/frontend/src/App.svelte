@@ -59,6 +59,20 @@
   let activeView = $derived(getViewFromPath(currentPath));
   let showFlowEditor = $state(false);
   let selectedFlowId = $state<string | null>(null);
+  
+  // Update URL when flow editor opens/closes
+  $effect(() => {
+    if (showFlowEditor && selectedFlowId) {
+      // Update URL to /flows/{flow_id}
+      navigateTo(`/flows/${selectedFlowId}`);
+    } else if (showFlowEditor && !selectedFlowId) {
+      // New flow - update URL to /flows/new
+      navigateTo('/flows/new');
+    } else if (!showFlowEditor && currentPath.startsWith('/flows/')) {
+      // Flow editor closed - navigate back to /flows
+      navigateTo('/flows');
+    }
+  });
   let flowListKey = $state(0); // Force re-render of FlowList
   let showFlowRuns = $state(false);
   let selectedFlowForRuns = $state<string | null>(null);
@@ -711,10 +725,32 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     // Initialize router
     initRouter((path) => {
       currentPath = path;
+      
       // Redirect root to /tasks
       if (path === '/') {
         navigateTo('/tasks');
         currentPath = '/tasks';
+        return;
+      }
+      
+      // Handle /flows/{flow_id} route - open flow editor
+      const flowMatch = path.match(/^\/flows\/(.+)$/);
+      if (flowMatch && flowMatch[1] !== 'new') {
+        const flowId = flowMatch[1];
+        if (selectedFlowId !== flowId) {
+          selectedFlowId = flowId;
+          showFlowEditor = true;
+        }
+      } else if (path === '/flows/new') {
+        // Handle /flows/new route - open new flow editor
+        if (!showFlowEditor || selectedFlowId !== null) {
+          selectedFlowId = null;
+          showFlowEditor = true;
+        }
+      } else if (path === '/flows' && showFlowEditor) {
+        // If we're on /flows and editor is open, close it
+        showFlowEditor = false;
+        selectedFlowId = null;
       }
     });
     
@@ -1072,6 +1108,7 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
             showFlowEditor = false;
             selectedFlowId = null;
             flowListKey += 1; // Refresh list when closing
+            // URL will be updated by the $effect above
           }}
         />
       </div>
