@@ -10,6 +10,7 @@
   import FlowRunsDialog from './FlowRunsDialog.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
+  import { initRouter, navigateTo, getCurrentPath } from './routes';
 
   interface Task {
     id: string;
@@ -45,7 +46,17 @@
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
   let showPVFileManager = $state(false);
-  let activeView = $state<'tasks' | 'flows'>('tasks');
+  
+  // Determine active view from URL
+  function getViewFromPath(path: string): 'tasks' | 'flows' {
+    if (path === '/flows' || path.startsWith('/flows/')) {
+      return 'flows';
+    }
+    return 'tasks'; // Default to tasks
+  }
+  
+  let currentPath = $state(getCurrentPath());
+  let activeView = $derived(getViewFromPath(currentPath));
   let showFlowEditor = $state(false);
   let selectedFlowId = $state<string | null>(null);
   let flowListKey = $state(0); // Force re-render of FlowList
@@ -697,6 +708,22 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
   });
 
   onMount(() => {
+    // Initialize router
+    initRouter((path) => {
+      currentPath = path;
+      // Redirect root to /tasks
+      if (path === '/') {
+        navigateTo('/tasks');
+        currentPath = '/tasks';
+      }
+    });
+    
+    // Redirect root to /tasks if needed
+    if (getCurrentPath() === '/') {
+      navigateTo('/tasks');
+      currentPath = '/tasks';
+    }
+    
     fetchTasks(true);
     
     // Set up periodic task status updates
@@ -719,13 +746,13 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     <h1 class="text-3xl font-bold">Argo Workflow Manager</h1>
     <div class="flex gap-2">
       <Button
-        onclick={() => activeView = 'tasks'}
+        onclick={() => navigateTo('/tasks')}
         variant={activeView === 'tasks' ? 'default' : 'outline'}
       >
         Tasks
       </Button>
       <Button
-        onclick={() => activeView = 'flows'}
+        onclick={() => navigateTo('/flows')}
         variant={activeView === 'flows' ? 'default' : 'outline'}
       >
         Flows
