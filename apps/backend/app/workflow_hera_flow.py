@@ -364,3 +364,209 @@ def create_flow_workflow_with_hera(
             detail=f"Failed to create flow workflow: {str(e)}"
         )
 
+
+def generate_flow_workflow_template(
+    flow_definition: Dict,
+    namespace: str = "argo"
+) -> Dict:
+    """
+    Generate an Argo Workflow template from a flow definition without submitting it.
+    This uses the exact same logic as create_flow_workflow_with_hera but doesn't submit to Kubernetes.
+    
+    Args:
+        flow_definition: Flow definition containing:
+            - steps: List of step definitions with id, name, pythonCode, dependencies, etc.
+            - edges: List of edge definitions with source, target (dependencies)
+        namespace: Kubernetes namespace for the workflow
+        
+    Returns:
+        workflow_dict: The workflow dictionary (ready to be converted to YAML)
+        
+    Raises:
+        HTTPException: If workflow generation fails
+    """
+    # Extract steps and edges from definition
+    steps = flow_definition.get("steps", [])
+    edges = flow_definition.get("edges", [])
+    
+    if not steps:
+        raise HTTPException(
+            status_code=400,
+            detail="Flow definition must contain at least one step"
+        )
+    
+    # Validate DAG structure (check for cycles) - same as create_flow_workflow_with_hera
+    step_ids = {step["id"] for step in steps}
+    dependencies_map: Dict[str, List[str]] = {step_id: [] for step_id in step_ids}
+    
+    for edge in edges:
+        source = edge.get("source")
+        target = edge.get("target")
+        if source and target:
+            if source not in step_ids or target not in step_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Edge references invalid step: source={source}, target={target}"
+                )
+            dependencies_map[target].append(source)
+    
+    # Simple cycle detection using DFS
+    def has_cycle(step_id: str, visited: set[str], rec_stack: set[str]) -> bool:
+        visited.add(step_id)
+        rec_stack.add(step_id)
+        
+        for dep in dependencies_map.get(step_id, []):
+            if dep not in visited:
+                if has_cycle(dep, visited, rec_stack):
+                    return True
+            elif dep in rec_stack:
+                return True
+        
+        rec_stack.remove(step_id)
+        return False
+    
+    visited: Set[str] = set()
+    for step_id in step_ids:
+        if step_id not in visited:
+            if has_cycle(step_id, visited, set()):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Flow contains cycles. DAG must be acyclic."
+                )
+    
+    # Create workflow with Hera - same as create_flow_workflow_with_hera
+    workflow = Workflow(
+        generate_name="flow-",
+        entrypoint="dag",
+        namespace=namespace,
+        volumes=[
+            Volume(
+                name="task-results",
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
+            )
+        ]
+    )
+    
+    # Create task templates for each step - same logic as create_flow_workflow_with_hera
+    step_templates = {}
+    for step in steps:
+        step_id = step["id"]
+        step_name = step.get("name", step_id)
+        python_code = step.get("pythonCode", "")
+        dependencies = step.get("dependencies")
+        requirements_file = step.get("requirementsFile")
+        
+        # Build environment variables
+        env_vars = [
+            EnvVar(name="ARGO_WORKFLOW_NAME", value="{{workflow.name}}"),
+            EnvVar(name="STEP_ID", value=step_id),
+            EnvVar(name="STEP_NAME", value=step_name),
+        ]
+        
+        has_dependencies = bool(dependencies or requirements_file)
+        
+        if has_dependencies:
+            dependencies_value = "requirements.txt" if requirements_file else (dependencies or "")
+            env_vars.append(EnvVar(name="DEPENDENCIES", value=dependencies_value))
+            
+            script_source = build_step_script_source(
+                step_id=step_id,
+                python_code=python_code,
+                dependencies=dependencies,
+                requirements_file=requirements_file,
+                flow_definition=flow_definition
+            )
+            
+            script_template = Script(
+                name=step_id,
+                image="python:3.11-slim",
+                command=["bash"],
+                source=script_source,
+                env=env_vars,
+                volume_mounts=[
+                    VolumeMount(name="task-results", mount_path="/mnt/results")
+                ]
+            )
+            
+            workflow.templates.append(script_template)
+            step_templates[step_id] = script_template
+        else:
+            # For steps without dependencies, we still need to inject helper functions
+            # So we use a script template even for simple cases
+            script_source = build_step_script_source(
+                step_id=step_id,
+                python_code=python_code,
+                dependencies=None,
+                requirements_file=None,
+                flow_definition=flow_definition
+            )
+            
+            script_template = Script(
+                name=step_id,
+                image="python:3.11-slim",
+                command=["bash"],
+                source=script_source,
+                env=env_vars,
+                volume_mounts=[
+                    VolumeMount(name="task-results", mount_path="/mnt/results")
+                ]
+            )
+            
+            workflow.templates.append(script_template)
+            step_templates[step_id] = script_template
+    
+    # Create DAG template with tasks and dependencies
+    dag_template = DAG(name="dag")
+    
+    for step in steps:
+        step_id = step["id"]
+        # Get dependencies for this step from edges
+        step_dependencies = [
+            edge["source"] for edge in edges 
+            if edge.get("target") == step_id
+        ]
+        
+        task = Task(
+            name=step_id,
+            template=step_id,
+            dependencies=step_dependencies if step_dependencies else None
+        )
+        dag_template.tasks.append(task)
+    
+    workflow.templates.append(dag_template)
+    
+    # Build workflow object using Hera SDK - same as create_flow_workflow_with_hera
+    workflow_obj = workflow.build()
+    
+    # Convert Workflow object to dict
+    if isinstance(workflow_obj, dict):
+        workflow_dict = workflow_obj
+    elif hasattr(workflow_obj, 'model_dump'):
+        # Pydantic v2
+        workflow_dict = workflow_obj.model_dump(exclude_none=True, by_alias=True, mode='json')
+    elif hasattr(workflow_obj, 'model_dump_json'):
+        # Pydantic v2 via JSON
+        workflow_dict = json.loads(workflow_obj.model_dump_json(exclude_none=True, by_alias=True))
+    elif hasattr(workflow_obj, 'dict'):
+        # Pydantic v1
+        workflow_dict = workflow_obj.dict(exclude_none=True, by_alias=True)
+    else:
+        # Fallback
+        import json
+        try:
+            workflow_dict = json.loads(json.dumps(workflow_obj, default=str))
+        except Exception:
+            workflow_dict = dict(workflow_obj) if hasattr(workflow_obj, '__dict__') else {}
+    
+    # Debug: Verify templates are included
+    # Templates should be in spec.templates for Argo Workflows
+    if 'spec' in workflow_dict and 'templates' in workflow_dict['spec']:
+        template_count = len(workflow_dict['spec']['templates'])
+        print(f"Generated workflow has {template_count} templates (expected {len(steps) + 1} = {len(steps)} steps + 1 DAG)")
+    else:
+        print(f"Warning: Templates not found in expected location. Workflow dict keys: {workflow_dict.keys()}")
+        if 'spec' in workflow_dict:
+            print(f"Spec keys: {workflow_dict['spec'].keys()}")
+    
+    return workflow_dict
+

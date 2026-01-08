@@ -13,7 +13,7 @@ from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal, 
 # Hera SDK integration (required)
 try:
     from app.workflow_hera import create_workflow_with_hera  # type: ignore
-    from app.workflow_hera_flow import create_flow_workflow_with_hera  # type: ignore
+    from app.workflow_hera_flow import create_flow_workflow_with_hera, generate_flow_workflow_template  # type: ignore
 except ImportError as e:
     raise ImportError(f"Hera SDK is required but not available: {e}. Please install hera: poetry add hera")
 
@@ -2811,6 +2811,51 @@ async def delete_flow(flow_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=f"Failed to delete flow: {str(e)}")
     finally:
         db.close()
+
+
+# ============================================================================
+# Flow Template Preview API Endpoints
+# ============================================================================
+
+@app.post("/api/v1/flows/preview-template")
+async def preview_flow_template(request: FlowCreateRequest):
+    """Generate a preview Argo Workflow template from a flow definition without saving or running it."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Build flow definition from request
+        flow_definition = {
+            "steps": [step.model_dump() for step in (request.steps or [])],
+            "edges": [edge.model_dump() for edge in (request.edges or [])]
+        }
+        
+        # Import the template generation function
+        from app.workflow_hera_flow import generate_flow_workflow_template
+        
+        # Generate workflow template
+        workflow_dict = generate_flow_workflow_template(
+            flow_definition=flow_definition,
+            namespace=namespace
+        )
+        
+        # Convert to YAML format
+        try:
+            import yaml
+            yaml_str = yaml.dump(workflow_dict, default_flow_style=False, sort_keys=False, allow_unicode=True)
+        except ImportError:
+            # Fallback to JSON if PyYAML is not available
+            import json
+            yaml_str = json.dumps(workflow_dict, indent=2, default=str)
+        
+        return {
+            "yaml": yaml_str
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to generate template: {str(e)}")
 
 
 # ============================================================================

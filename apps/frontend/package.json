@@ -10,6 +10,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^1.1.8",
     "@melt-ui/svelte": "^0.77.0",
     "@svar-ui/svelte-filemanager": "^2.4.0",
     "@xyflow/svelte": "^1.5.0",

@@ -1,9 +1,12 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SvelteFlow, Background, Controls, MiniMap } from '@xyflow/svelte';
+  import { SvelteFlow, Background, Controls, MiniMap, Position } from '@xyflow/svelte';
   import type { Node, Edge, Connection } from '@xyflow/svelte';
+  import dagre from '@dagrejs/dagre';
+  import { FileCode } from 'lucide-svelte';
   import MonacoEditor from './MonacoEditor.svelte';
   import Button from '$lib/components/ui/button.svelte';
+  import Dialog from '$lib/components/ui/dialog.svelte';
   import type { FlowStep, FlowEdge } from '$lib/flow/types';
 
   interface Props {
@@ -17,6 +20,15 @@
   let { flowId, flowName = 'New Flow', onSave, onClose, onRun }: Props = $props();
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+
+  // Dagre layout setup
+  const dagreGraph = new dagre.graphlib.Graph();
+  dagreGraph.setDefaultEdgeLabel(() => ({}));
+  
+  // Node dimensions for Dagre layout (should match CSS)
+  // Based on the CSS, nodes are 120px wide and ~60px tall (including padding)
+  const nodeWidth = 120;
+  const nodeHeight = 60;
 
   // Flow state
   let nodes = $state<Node[]>([]);
@@ -33,6 +45,11 @@
   let flowNameInput = $state('');
   let savedFlowId = $state<string | null>(null);
   let lastPropFlowName = $state<string | undefined>(undefined);
+  
+  // Template dialog state
+  let templateDialogOpen = $state(false);
+  let templateYaml = $state<string>('');
+  let loadingTemplate = $state(false);
   
   // Sync props to state using $effect - this properly tracks prop changes
   // Only update when the prop actually changes, not when local state changes
@@ -52,6 +69,49 @@
       savedFlowId = newFlowId;
     }
   });
+
+  // Dagre layout function
+  function getLayoutedElements(nodes: Node[], edges: Edge[], direction: 'TB' | 'LR' = 'TB') {
+    const isHorizontal = direction === 'LR';
+    dagreGraph.setGraph({ rankdir: direction });
+
+    nodes.forEach((node) => {
+      dagreGraph.setNode(node.id, { width: nodeWidth, height: nodeHeight });
+    });
+
+    edges.forEach((edge) => {
+      dagreGraph.setEdge(edge.source, edge.target);
+    });
+
+    dagre.layout(dagreGraph);
+
+    const layoutedNodes = nodes.map((node) => {
+      const nodeWithPosition = dagreGraph.node(node.id);
+      node.targetPosition = isHorizontal ? Position.Left : Position.Top;
+      node.sourcePosition = isHorizontal ? Position.Right : Position.Bottom;
+
+      // We are shifting the dagre node position (anchor=center center) to the top left
+      // so it matches the Svelte Flow node anchor point (top left).
+      return {
+        ...node,
+        position: {
+          x: nodeWithPosition.x - nodeWidth / 2,
+          y: nodeWithPosition.y - nodeHeight / 2,
+        },
+      };
+    });
+
+    return { nodes: layoutedNodes, edges };
+  }
+
+  // Apply layout to nodes and edges
+  function applyLayout() {
+    if (nodes.length === 0) return;
+    
+    const layouted = getLayoutedElements(nodes, edges, 'TB');
+    nodes = layouted.nodes;
+    edges = layouted.edges;
+  }
 
   // Load flow if flowId provided
   onMount(async () => {
@@ -90,6 +150,9 @@
           sourceHandle: edge.sourceHandle,
           targetHandle: edge.targetHandle,
         }));
+        
+        // Apply Dagre layout after loading
+        applyLayout();
       }
     } catch (error) {
       console.error('Failed to load flow:', error);
@@ -102,7 +165,7 @@
     const newNode: Node = {
       id: newNodeId,
       type: 'default',
-      position: { x: Math.random() * 400, y: Math.random() * 400 },
+      position: { x: 0, y: 0 }, // Position will be set by Dagre layout
       data: {
         label: `Step ${nodes.length + 1}`,
         pythonCode: "print('Hello from step')",
@@ -110,6 +173,9 @@
       }
     };
     nodes = [...nodes, newNode];
+    
+    // Apply layout after adding node
+    applyLayout();
     
     // Automatically open editor for the new node
     // Use setTimeout to ensure reactive updates happen
@@ -193,6 +259,9 @@
       selectedNodeId = null;
       showStepEditor = false;
     }
+    
+    // Apply layout after deletion
+    applyLayout();
   }
 
   function onConnect(connection: Connection) {
@@ -205,6 +274,9 @@
         targetHandle: connection.targetHandle,
       };
       edges = [...edges, newEdge];
+      
+      // Apply layout after adding edge
+      applyLayout();
     }
   }
 
@@ -321,6 +393,61 @@
     // Don't clear selectedNodeId - allow reopening the same node
   }
 
+  async function fetchTemplate() {
+    if (nodes.length === 0) {
+      alert('Please add at least one step to generate a template');
+      return;
+    }
+    
+    try {
+      loadingTemplate = true;
+      
+      // Build flow definition from current nodes and edges
+      const flowSteps: FlowStep[] = nodes.map(node => {
+        const nodeData = node.data || {};
+        return {
+          id: node.id,
+          name: (nodeData.label as string) || node.id,
+          pythonCode: (nodeData.pythonCode as string) || '',
+          dependencies: (nodeData.dependencies as string) || undefined,
+          position: node.position,
+        };
+      });
+
+      const flowEdges: FlowEdge[] = edges.map(edge => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        sourceHandle: edge.sourceHandle,
+        targetHandle: edge.targetHandle,
+      }));
+
+      const res = await fetch(`${apiUrl}/api/v1/flows/preview-template`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: flowNameInput || 'Preview Flow',
+          steps: flowSteps,
+          edges: flowEdges,
+        }),
+      });
+      
+      if (res.ok) {
+        const data = await res.json();
+        templateYaml = data.yaml || '';
+        templateDialogOpen = true;
+      } else {
+        const errorData = await res.json();
+        alert(`Failed to generate template: ${errorData.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Failed to fetch template:', error);
+      alert('Failed to generate template. Please try again.');
+    } finally {
+      loadingTemplate = false;
+    }
+  }
+
   async function runFlow() {
     const flowIdToRun = savedFlowId || flowId;
     if (!flowIdToRun) {
@@ -367,6 +494,9 @@
       <div class="flow-editor-actions">
         <Button onclick={addNode} variant="outline" size="sm" title="Add a new step (editor will open automatically)">
           + Add Step
+        </Button>
+        <Button onclick={fetchTemplate} variant="outline" disabled={loadingTemplate || nodes.length === 0}>
+          <FileCode size={16} class="mr-2" /> Template
         </Button>
       <Button onclick={saveFlow} disabled={saving} variant="default">
         {saving ? 'Saving...' : 'Save Flow'}
@@ -454,6 +584,23 @@
     {/if}
   </div>
 </div>
+
+<!-- Template Dialog -->
+<Dialog bind:open={templateDialogOpen} onOpenChange={(open: boolean) => templateDialogOpen = open} class="max-w-4xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
+  <div class="flex justify-between items-center mb-4">
+    <h2 class="text-2xl font-semibold">Workflow Template Preview</h2>
+  </div>
+  
+  <div class="flex-1 overflow-hidden flex flex-col">
+    {#if loadingTemplate}
+      <p class="text-muted-foreground">Generating template...</p>
+    {:else if templateYaml}
+      <MonacoEditor bind:value={templateYaml} language="yaml" theme="vs-dark" height="100%" readonly={true} />
+    {:else}
+      <p class="text-muted-foreground">No template available</p>
+    {/if}
+  </div>
+</Dialog>
 
 <style>
   .flow-editor-container {
