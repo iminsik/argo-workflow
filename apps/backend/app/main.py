@@ -8,7 +8,7 @@ from kubernetes import config  # type: ignore
 from kubernetes.client import CustomObjectsApi, CoreV1Api  # type: ignore
 from kubernetes.stream import stream  # type: ignore
 from sqlalchemy.orm import Session
-from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal  # type: ignore
+from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal, Flow, FlowRun, FlowStepRun, FlowStepLog  # type: ignore
 
 # Hera SDK integration (required)
 try:
@@ -124,6 +124,37 @@ class TaskSubmitRequest(BaseModel):
     dependencies: str | None = None  # Space or comma-separated package names
     requirementsFile: str | None = None  # requirements.txt content
     taskId: str | None = None  # Optional: task ID for rerun (creates new run of existing task)
+
+
+class FlowStepRequest(BaseModel):
+    id: str
+    name: str
+    pythonCode: str
+    dependencies: str | None = None
+    requirementsFile: str | None = None
+    position: dict  # {"x": number, "y": number}
+
+
+class FlowEdgeRequest(BaseModel):
+    id: str
+    source: str
+    target: str
+    sourceHandle: str | None = None
+    targetHandle: str | None = None
+
+
+class FlowCreateRequest(BaseModel):
+    name: str
+    description: str | None = None
+    steps: list[FlowStepRequest]
+    edges: list[FlowEdgeRequest]
+
+
+class FlowUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    steps: list[FlowStepRequest] | None = None
+    edges: list[FlowEdgeRequest] | None = None
 
 
 # Persistent Pod Manager for PV file operations
@@ -2587,3 +2618,181 @@ except Exception as e:
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Error uploading file: {str(e)}")
+
+
+# ============================================================================
+# Flow Management API Endpoints
+# ============================================================================
+
+@app.post("/api/v1/flows")
+async def create_flow(request: FlowCreateRequest, db: Session = Depends(get_db)):
+    """Create a new flow definition."""
+    try:
+        # Generate flow ID
+        flow_id = f"flow-{uuid.uuid4().hex[:12]}"
+        
+        # Build definition from request
+        definition = {
+            "steps": [step.model_dump() for step in request.steps],
+            "edges": [edge.model_dump() for edge in request.edges]
+        }
+        
+        # Create flow record
+        flow = Flow(
+            id=flow_id,
+            name=request.name,
+            description=request.description,
+            definition=definition,
+            status="draft"
+        )
+        db.add(flow)
+        db.commit()
+        db.refresh(flow)
+        
+        return {
+            "id": flow_id,
+            "name": flow.name,
+            "description": flow.description,
+            "steps": definition["steps"],
+            "edges": definition["edges"],
+            "status": flow.status,
+            "createdAt": flow.created_at.isoformat(),
+            "updatedAt": flow.updated_at.isoformat()
+        }
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to create flow: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/flows")
+async def list_flows(db: Session = Depends(get_db)):
+    """List all flows."""
+    try:
+        flows = db.query(Flow).order_by(Flow.updated_at.desc()).all()
+        return {
+            "flows": [
+                {
+                    "id": flow.id,
+                    "name": flow.name,
+                    "description": flow.description,
+                    "status": flow.status,
+                    "createdAt": flow.created_at.isoformat(),
+                    "updatedAt": flow.updated_at.isoformat(),
+                    "stepCount": len(flow.definition.get("steps", [])) if isinstance(flow.definition, dict) else 0
+                }
+                for flow in flows
+            ]
+        }
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to list flows: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/flows/{flow_id}")
+async def get_flow(flow_id: str, db: Session = Depends(get_db)):
+    """Get flow definition."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        definition = flow.definition if isinstance(flow.definition, dict) else {}
+        
+        return {
+            "id": flow.id,
+            "name": flow.name,
+            "description": flow.description,
+            "steps": definition.get("steps", []),
+            "edges": definition.get("edges", []),
+            "status": flow.status,
+            "createdAt": flow.created_at.isoformat(),
+            "updatedAt": flow.updated_at.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get flow: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.put("/api/v1/flows/{flow_id}")
+async def update_flow(flow_id: str, request: FlowUpdateRequest, db: Session = Depends(get_db)):
+    """Update flow definition."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        # Update fields if provided
+        if request.name is not None:
+            flow.name = request.name
+        if request.description is not None:
+            flow.description = request.description
+        
+        # Update definition if steps or edges provided
+        if request.steps is not None or request.edges is not None:
+            definition = flow.definition if isinstance(flow.definition, dict) else {}
+            if request.steps is not None:
+                definition["steps"] = [step.model_dump() for step in request.steps]
+            if request.edges is not None:
+                definition["edges"] = [edge.model_dump() for edge in request.edges]
+            flow.definition = definition
+        
+        flow.updated_at = datetime.utcnow()
+        db.commit()
+        db.refresh(flow)
+        
+        definition = flow.definition if isinstance(flow.definition, dict) else {}
+        
+        return {
+            "id": flow.id,
+            "name": flow.name,
+            "description": flow.description,
+            "steps": definition.get("steps", []),
+            "edges": definition.get("edges", []),
+            "status": flow.status,
+            "createdAt": flow.created_at.isoformat(),
+            "updatedAt": flow.updated_at.isoformat()
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to update flow: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.delete("/api/v1/flows/{flow_id}")
+async def delete_flow(flow_id: str, db: Session = Depends(get_db)):
+    """Delete flow."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        db.delete(flow)
+        db.commit()
+        
+        return {"message": f"Flow {flow_id} deleted successfully"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to delete flow: {str(e)}")
+    finally:
+        db.close()

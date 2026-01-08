@@ -5,6 +5,8 @@
   import TaskRow from './TaskRow.svelte';
   import TaskDialog from './TaskDialog.svelte';
   import PVFileManager from './PVFileManager.svelte';
+  import FlowList from './FlowList.svelte';
+  import FlowEditor from './FlowEditor.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
 
@@ -42,6 +44,10 @@
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
   let showPVFileManager = $state(false);
+  let activeView = $state<'tasks' | 'flows'>('tasks');
+  let showFlowEditor = $state(false);
+  let selectedFlowId = $state<string | null>(null);
+  let flowListKey = $state(0); // Force re-render of FlowList
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
@@ -709,6 +715,20 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
   <div class="flex justify-between items-center mb-8">
     <h1 class="text-3xl font-bold">Argo Workflow Manager</h1>
     <div class="flex gap-2">
+      <Button
+        onclick={() => activeView = 'tasks'}
+        variant={activeView === 'tasks' ? 'default' : 'outline'}
+      >
+        Tasks
+      </Button>
+      <Button
+        onclick={() => activeView = 'flows'}
+        variant={activeView === 'flows' ? 'default' : 'outline'}
+      >
+        Flows
+      </Button>
+    </div>
+    <div class="flex gap-2">
       <Button 
         onclick={() => fetchTasks(true)} 
         disabled={initialLoading}
@@ -731,8 +751,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     </div>
   </div>
 
-  <div class="mt-8">
-    <h2 class="text-2xl font-semibold mb-4">Submitted Tasks</h2>
+  {#if activeView === 'tasks'}
+    <div class="mt-8">
+      <h2 class="text-2xl font-semibold mb-4">Submitted Tasks</h2>
     {#if initialLoading && tasks.length === 0}
       <p class="text-muted-foreground">Loading tasks...</p>
     {:else if tasks.length === 0}
@@ -776,7 +797,23 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         </table>
       </div>
     {/if}
-  </div>
+    </div>
+  {:else if activeView === 'flows'}
+    <FlowList
+      key={flowListKey}
+      onFlowSelect={(flowId) => {
+        selectedFlowId = flowId;
+        showFlowEditor = true;
+      }}
+      onFlowCreate={() => {
+        selectedFlowId = null;
+        showFlowEditor = true;
+      }}
+      onFlowSaved={() => {
+        flowListKey += 1; // Refresh FlowList
+      }}
+    />
+  {/if}
 
   {#if selectedTask}
     <TaskDialog
@@ -939,4 +976,24 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
       <PVFileManager />
     </div>
   </Dialog>
+
+  {#if showFlowEditor}
+    <div class="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-lg shadow-xl w-full h-full max-w-[95vw] max-h-[95vh] flex flex-col">
+        <FlowEditor
+          flowId={selectedFlowId}
+          flowName={selectedFlowId ? undefined : 'New Flow'}
+          onSave={async (flow) => {
+            // Flow is saved via API in FlowEditor, just refresh the list
+            flowListKey += 1;
+          }}
+          onClose={() => {
+            showFlowEditor = false;
+            selectedFlowId = null;
+            flowListKey += 1; // Refresh list when closing
+          }}
+        />
+      </div>
+    </div>
+  {/if}
 </div>

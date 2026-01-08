@@ -12,6 +12,7 @@
   "dependencies": {
     "@melt-ui/svelte": "^0.77.0",
     "@svar-ui/svelte-filemanager": "^2.4.0",
+    "@xyflow/svelte": "^1.5.0",
     "clsx": "^2.1.0",
     "lucide-svelte": "^0.562.0",
     "monaco-editor": "^0.44.0",
