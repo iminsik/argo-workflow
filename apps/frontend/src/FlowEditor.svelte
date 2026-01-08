@@ -235,13 +235,24 @@
 
     saving = true;
     try {
-      const flowSteps: FlowStep[] = nodes.map(node => ({
-        id: node.id,
-        name: node.data.label,
-        pythonCode: node.data.pythonCode || '',
-        dependencies: node.data.dependencies || undefined,
-        position: node.position,
-      }));
+      // Ensure we have nodes before saving
+      if (nodes.length === 0) {
+        alert('Please add at least one step to the flow before saving');
+        saving = false;
+        return;
+      }
+
+      const flowSteps: FlowStep[] = nodes.map(node => {
+        // Ensure node data exists
+        const nodeData = node.data || {};
+        return {
+          id: node.id,
+          name: (nodeData.label as string) || node.id,
+          pythonCode: (nodeData.pythonCode as string) || '',
+          dependencies: (nodeData.dependencies as string) || undefined,
+          position: node.position,
+        };
+      });
 
       const flowEdges: FlowEdge[] = edges.map(edge => ({
         id: edge.id,
@@ -262,6 +273,10 @@
         steps: flowSteps,
         edges: flowEdges,
       };
+
+      console.log('Saving flow with body:', JSON.stringify(body, null, 2));
+      console.log('Number of steps:', flowSteps.length);
+      console.log('Number of edges:', flowEdges.length);
 
       const res = await fetch(url, {
         method,

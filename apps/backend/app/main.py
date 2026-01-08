@@ -2632,6 +2632,13 @@ async def create_flow(request: FlowCreateRequest, db: Session = Depends(get_db))
         # Generate flow ID
         flow_id = f"flow-{uuid.uuid4().hex[:12]}"
         
+        # Debug logging
+        print(f"Creating flow: {request.name}")
+        print(f"Number of steps received: {len(request.steps)}")
+        print(f"Number of edges received: {len(request.edges)}")
+        if request.steps:
+            print(f"First step: {request.steps[0].model_dump()}")
+        
         # Build definition from request
         definition = {
             "steps": [step.model_dump() for step in request.steps],
@@ -2742,6 +2749,13 @@ async def update_flow(flow_id: str, request: FlowUpdateRequest, db: Session = De
         
         # Update definition if steps or edges provided
         if request.steps is not None or request.edges is not None:
+            # Debug logging
+            print(f"Updating flow: {flow_id}")
+            print(f"Number of steps received: {len(request.steps) if request.steps else 0}")
+            print(f"Number of edges received: {len(request.edges) if request.edges else 0}")
+            if request.steps:
+                print(f"First step: {request.steps[0].model_dump()}")
+            
             definition = flow.definition if isinstance(flow.definition, dict) else {}
             if request.steps is not None:
                 definition["steps"] = [step.model_dump() for step in request.steps]
