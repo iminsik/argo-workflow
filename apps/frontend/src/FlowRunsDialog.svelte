@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
-  import { X, Play, RefreshCw } from 'lucide-svelte';
+  import { X, Play, RefreshCw, FileCode } from 'lucide-svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
   import Badge from '$lib/components/ui/badge.svelte';
+  import MonacoEditor from './MonacoEditor.svelte';
 
   interface Props {
     flowId: string;
@@ -22,6 +23,11 @@
   let loadingDetails = $state(false);
   let refreshInterval: ReturnType<typeof setInterval> | null = null;
   const REFRESH_INTERVAL_MS = 2000; // 2 seconds, same as tasks
+  
+  // Template dialog state
+  let templateDialogOpen = $state(false);
+  let templateYaml = $state<string>('');
+  let loadingTemplate = $state(false);
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -135,6 +141,28 @@
       onClose();
     }
   }
+
+  async function fetchTemplate() {
+    if (!selectedRunNumber) return;
+    
+    try {
+      loadingTemplate = true;
+      const res = await fetch(`${apiUrl}/api/v1/flows/${flowId}/runs/${selectedRunNumber}/template`);
+      if (res.ok) {
+        const data = await res.json();
+        templateYaml = data.yaml || '';
+        templateDialogOpen = true;
+      } else {
+        const errorData = await res.json();
+        alert(`Failed to fetch template: ${errorData.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Failed to fetch template:', error);
+      alert('Failed to fetch template. Please try again.');
+    } finally {
+      loadingTemplate = false;
+    }
+  }
 </script>
 
 <Dialog bind:open={dialogOpen} onOpenChange={handleOpenChange} class="max-w-6xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
@@ -192,7 +220,12 @@
         <p class="text-muted-foreground">Loading details...</p>
       {:else if runDetails}
         <div>
-          <h3 class="font-semibold mb-4">Run #{runDetails.runNumber} Details</h3>
+          <div class="flex justify-between items-center mb-4">
+            <h3 class="font-semibold">Run #{runDetails.runNumber} Details</h3>
+            <Button onclick={fetchTemplate} variant="outline" disabled={loadingTemplate}>
+              <FileCode size={16} class="mr-2" /> Template
+            </Button>
+          </div>
           
           <div class="mb-4 p-4 bg-muted rounded">
             <div class="grid grid-cols-2 gap-4">
@@ -242,6 +275,23 @@
         </div>
       {/if}
     </div>
+  </div>
+</Dialog>
+
+<!-- Template Dialog -->
+<Dialog bind:open={templateDialogOpen} onOpenChange={(open) => templateDialogOpen = open} class="max-w-4xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
+  <div class="flex justify-between items-center mb-4">
+    <h2 class="text-2xl font-semibold">Workflow Template</h2>
+  </div>
+  
+  <div class="flex-1 overflow-hidden flex flex-col">
+    {#if loadingTemplate}
+      <p class="text-muted-foreground">Loading template...</p>
+    {:else if templateYaml}
+      <MonacoEditor bind:value={templateYaml} language="yaml" theme="vs-dark" height="100%" readonly={true} />
+    {:else}
+      <p class="text-muted-foreground">No template available</p>
+    {/if}
   </div>
 </Dialog>
 

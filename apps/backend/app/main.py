@@ -3220,3 +3220,73 @@ async def get_flow_run_logs(flow_id: str, run_number: int, db: Session = Depends
         raise HTTPException(status_code=500, detail=f"Failed to get flow run logs: {str(e)}")
     finally:
         db.close()
+
+
+@app.get("/api/v1/flows/{flow_id}/runs/{run_number}/template")
+async def get_flow_run_template(flow_id: str, run_number: int, db: Session = Depends(get_db)):
+    """Get the Argo Workflow YAML template for a flow run."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        flow_run = db.query(FlowRun).filter(
+            FlowRun.flow_id == flow_id,
+            FlowRun.run_number == run_number
+        ).first()
+        
+        if not flow_run:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flow run {run_number} not found for flow {flow_id}"
+            )
+        
+        if not flow_run.workflow_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow ID not found for flow run {run_number}"
+            )
+        
+        # Fetch workflow from Kubernetes
+        try:
+            from kubernetes.client import CustomObjectsApi
+            custom_api = CustomObjectsApi()
+            
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=flow_run.workflow_id
+            )
+            
+            # Convert to YAML format
+            try:
+                import yaml
+                yaml_str = yaml.dump(workflow, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            except ImportError:
+                # Fallback to JSON if PyYAML is not available
+                import json
+                yaml_str = json.dumps(workflow, indent=2, default=str)
+            
+            return {
+                "workflowId": flow_run.workflow_id,
+                "yaml": yaml_str
+            }
+        except Exception as k8s_error:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch workflow from Kubernetes: {str(k8s_error)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get flow run template: {str(e)}")
+    finally:
+        db.close()
