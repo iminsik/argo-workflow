@@ -471,11 +471,25 @@
   .flow-name-input {
     font-size: 1.25rem;
     font-weight: 600;
-    border: none;
+    border: 1px solid transparent;
+    border-radius: 4px;
     outline: none;
     padding: 0.5rem;
     flex: 1;
     max-width: 300px;
+    background: transparent;
+    transition: border-color 0.2s, background-color 0.2s;
+  }
+  
+  .flow-name-input:hover {
+    border-color: #e5e7eb;
+    background: #f9fafb;
+  }
+  
+  .flow-name-input:focus {
+    border-color: #3b82f6;
+    background: white;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
   }
 
   .flow-editor-actions {
@@ -551,6 +565,21 @@
   :global(.flow-editor-container .svelte-flow) {
     width: 100%;
     height: 100%;
+  }
+  
+  /* Make nodes narrower for better centering */
+  :global(.flow-canvas .svelte-flow__node) {
+    width: 120px !important;
+    min-width: 120px !important;
+    max-width: 120px !important;
+  }
+  
+  :global(.flow-canvas .svelte-flow__node .svelte-flow__node-label) {
+    font-size: 12px !important;
+    padding: 8px !important;
+    text-align: center !important;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
   }
 </style>
 
