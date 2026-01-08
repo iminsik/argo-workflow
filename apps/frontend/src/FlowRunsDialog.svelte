@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, onDestroy } from 'svelte';
   import { X, Play, RefreshCw } from 'lucide-svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
@@ -20,6 +20,8 @@
   let selectedRunNumber = $state<number | null>(null);
   let runDetails = $state<any | null>(null);
   let loadingDetails = $state(false);
+  let refreshInterval: ReturnType<typeof setInterval> | null = null;
+  const REFRESH_INTERVAL_MS = 2000; // 2 seconds, same as tasks
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -64,12 +66,42 @@
   $effect(() => {
     if (open && flowId) {
       fetchRuns();
+      
+      // Set up polling for runs that are pending or running
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+      }
+      
+      refreshInterval = setInterval(() => {
+        // Only poll if there are pending or running runs
+        const hasActiveRuns = runs.some(run => run.phase === 'Pending' || run.phase === 'Running');
+        if (hasActiveRuns) {
+          fetchRuns();
+          // Also refresh details if a run is selected
+          if (selectedRunNumber) {
+            fetchRunDetails(selectedRunNumber);
+          }
+        }
+      }, REFRESH_INTERVAL_MS);
+    } else {
+      // Clear interval when dialog closes
+      if (refreshInterval) {
+        clearInterval(refreshInterval);
+        refreshInterval = null;
+      }
     }
   });
 
   $effect(() => {
     if (selectedRunNumber) {
       fetchRunDetails(selectedRunNumber);
+    }
+  });
+
+  onDestroy(() => {
+    if (refreshInterval) {
+      clearInterval(refreshInterval);
+      refreshInterval = null;
     }
   });
 
@@ -96,9 +128,16 @@
       onClose();
     }
   });
+  
+  function handleOpenChange(newOpen: boolean) {
+    dialogOpen = newOpen;
+    if (!newOpen) {
+      onClose();
+    }
+  }
 </script>
 
-<Dialog bind:open={dialogOpen} class="max-w-6xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
+<Dialog bind:open={dialogOpen} onOpenChange={handleOpenChange} class="max-w-6xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
   <div class="flex justify-between items-center mb-4">
     <h2 class="text-2xl font-semibold">Flow Runs - {flowId}</h2>
     <div class="flex gap-2">

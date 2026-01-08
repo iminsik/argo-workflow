@@ -2956,6 +2956,8 @@ async def run_flow_step(flow_id: str, step_id: str, db: Session = Depends(get_db
 async def list_flow_runs(flow_id: str, db: Session = Depends(get_db)):
     """List all runs for a flow."""
     try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
         flow = db.query(Flow).filter(Flow.id == flow_id).first()
         if not flow:
             raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
@@ -2963,6 +2965,37 @@ async def list_flow_runs(flow_id: str, db: Session = Depends(get_db)):
         runs = db.query(FlowRun).filter(
             FlowRun.flow_id == flow_id
         ).order_by(FlowRun.run_number.desc()).all()
+        
+        # Update phases for runs that are still pending or running
+        try:
+            custom_api = CustomObjectsApi()
+            for run in runs:
+                if run.phase in ["Pending", "Running"]:
+                    try:
+                        workflow = custom_api.get_namespaced_custom_object(
+                            group="argoproj.io",
+                            version="v1alpha1",
+                            namespace=namespace,
+                            plural="workflows",
+                            name=run.workflow_id
+                        )
+                        status = workflow.get("status", {})
+                        current_workflow_phase = determine_workflow_phase(status)
+                        
+                        if run.phase != current_workflow_phase:
+                            run.phase = current_workflow_phase
+                            if status.get("startedAt"):
+                                run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
+                            if status.get("finishedAt"):
+                                run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
+                    except Exception as e:
+                        print(f"Could not fetch workflow status for {run.workflow_id}: {e}")
+                        # Continue with database value if workflow query fails
+            
+            db.commit()
+        except Exception as e:
+            print(f"Error updating flow run statuses: {e}")
+            # Continue with database values if update fails
         
         return {
             "runs": [
@@ -2992,6 +3025,8 @@ async def list_flow_runs(flow_id: str, db: Session = Depends(get_db)):
 async def get_flow_run(flow_id: str, run_number: int, db: Session = Depends(get_db)):
     """Get flow run details."""
     try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
         flow = db.query(Flow).filter(Flow.id == flow_id).first()
         if not flow:
             raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
@@ -3007,7 +3042,66 @@ async def get_flow_run(flow_id: str, run_number: int, db: Session = Depends(get_
                 detail=f"Flow run {run_number} not found for flow {flow_id}"
             )
         
-        # Get step runs
+        # Update flow run phase from Argo Workflows
+        try:
+            from kubernetes.client import CustomObjectsApi
+            custom_api = CustomObjectsApi()
+            
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=flow_run.workflow_id
+            )
+            status = workflow.get("status", {})
+            current_workflow_phase = determine_workflow_phase(status)
+            
+            # Update flow run phase if changed
+            if flow_run.phase != current_workflow_phase:
+                flow_run.phase = current_workflow_phase
+                if status.get("startedAt"):
+                    flow_run.started_at = datetime.fromisoformat(status.get("startedAt").replace("Z", "+00:00"))
+                if status.get("finishedAt"):
+                    flow_run.finished_at = datetime.fromisoformat(status.get("finishedAt").replace("Z", "+00:00"))
+                db.commit()
+            
+            # Update step run phases from workflow nodes
+            nodes = status.get("nodes", {})
+            step_runs = db.query(FlowStepRun).filter(
+                FlowStepRun.flow_run_id == flow_run.id
+            ).all()
+            
+            for step_run in step_runs:
+                # Find corresponding node in workflow
+                node_id = step_run.workflow_node_id
+                if node_id in nodes:
+                    node_info = nodes[node_id]
+                    node_phase = node_info.get("phase", "Pending")
+                    
+                    # Map Argo phases to our phases
+                    if node_phase in ["Succeeded"]:
+                        mapped_phase = "Succeeded"
+                    elif node_phase in ["Failed", "Error"]:
+                        mapped_phase = "Failed"
+                    elif node_phase == "Running":
+                        mapped_phase = "Running"
+                    else:
+                        mapped_phase = "Pending"
+                    
+                    if step_run.phase != mapped_phase:
+                        step_run.phase = mapped_phase
+                        if node_info.get("startedAt"):
+                            step_run.started_at = datetime.fromisoformat(node_info.get("startedAt").replace("Z", "+00:00"))
+                        if node_info.get("finishedAt"):
+                            step_run.finished_at = datetime.fromisoformat(node_info.get("finishedAt").replace("Z", "+00:00"))
+            
+            db.commit()
+        except Exception as e:
+            print(f"Could not fetch workflow status for {flow_run.workflow_id}: {e}")
+            # Continue with database values if workflow query fails
+        
+        # Refresh step runs after potential updates
         step_runs = db.query(FlowStepRun).filter(
             FlowStepRun.flow_run_id == flow_run.id
         ).all()
