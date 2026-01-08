@@ -3072,11 +3072,43 @@ async def get_flow_run(flow_id: str, run_number: int, db: Session = Depends(get_
                 FlowStepRun.flow_run_id == flow_run.id
             ).all()
             
+            # Debug: print available node IDs
+            if nodes:
+                print(f"Available workflow node IDs: {list(nodes.keys())[:10]}")
+            
             for step_run in step_runs:
                 # Find corresponding node in workflow
+                # Try multiple matching strategies:
+                # 1. Direct match with workflow_node_id
+                # 2. Match with workflow name prefix: {workflow_id}.{step_id}
+                # 3. Match by template name (node displayName or templateRef)
                 node_id = step_run.workflow_node_id
+                node_info = None
+                
+                # Strategy 1: Direct match
                 if node_id in nodes:
                     node_info = nodes[node_id]
+                else:
+                    # Strategy 2: Try with workflow name prefix
+                    prefixed_id = f"{flow_run.workflow_id}.{node_id}"
+                    if prefixed_id in nodes:
+                        node_info = nodes[prefixed_id]
+                        # Update workflow_node_id for future lookups
+                        step_run.workflow_node_id = prefixed_id
+                    else:
+                        # Strategy 3: Search by template name or displayName
+                        for node_key, node_data in nodes.items():
+                            template_name = node_data.get("templateName", "")
+                            display_name = node_data.get("displayName", "")
+                            # Check if this node corresponds to our step
+                            if template_name == node_id or display_name == node_id or node_key.endswith(f".{node_id}"):
+                                node_info = node_data
+                                # Update workflow_node_id for future lookups
+                                step_run.workflow_node_id = node_key
+                                print(f"Matched step {node_id} to workflow node {node_key}")
+                                break
+                
+                if node_info:
                     node_phase = node_info.get("phase", "Pending")
                     
                     # Map Argo phases to our phases
@@ -3090,11 +3122,14 @@ async def get_flow_run(flow_id: str, run_number: int, db: Session = Depends(get_
                         mapped_phase = "Pending"
                     
                     if step_run.phase != mapped_phase:
+                        print(f"Updating step {step_run.step_id} phase from {step_run.phase} to {mapped_phase}")
                         step_run.phase = mapped_phase
                         if node_info.get("startedAt"):
                             step_run.started_at = datetime.fromisoformat(node_info.get("startedAt").replace("Z", "+00:00"))
                         if node_info.get("finishedAt"):
                             step_run.finished_at = datetime.fromisoformat(node_info.get("finishedAt").replace("Z", "+00:00"))
+                else:
+                    print(f"Warning: Could not find workflow node for step {step_run.step_id} (looking for {node_id})")
             
             db.commit()
         except Exception as e:
