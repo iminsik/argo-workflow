@@ -97,94 +97,96 @@
   {:else if flows.length === 0}
     <p class="text-muted-foreground">No flows found. Create a new flow to get started.</p>
   {:else}
-    <div class="flow-list">
-      {#each flows as flow (flow.id)}
-        <div
-          class="flow-item"
-          onclick={() => handleFlowClick(flow.id)}
-          onkeydown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              handleFlowClick(flow.id);
-            }
-          }}
-          role="button"
-          tabindex="0"
-        >
-          <div class="flow-item-content">
-            <div class="flow-item-header">
-              <h3 class="flow-item-name">{flow.name}</h3>
-              <span
-                class="flow-status-badge"
-                style="background-color: {getStatusColor(flow.status)}"
-              >
-                {flow.status}
-              </span>
-            </div>
-            {#if flow.description}
-              <p class="flow-item-description">{flow.description}</p>
-            {/if}
-            <div class="flow-item-meta">
-              <span class="text-sm text-muted-foreground">
-                {flow.stepCount || 0} steps
-              </span>
-              <span class="text-sm text-muted-foreground">
-                Updated: {new Date(flow.updatedAt).toLocaleDateString()}
-              </span>
-            </div>
-          </div>
-          <div 
-            class="flow-item-actions" 
-            role="group"
-            aria-label="Flow actions"
-          >
-            {#if onFlowRun}
-              <Button
-                onclick={(e) => {
-                  e.stopPropagation();
-                  onFlowRun(flow.id);
-                }}
-                variant="default"
-                size="sm"
-              >
-                <Play size={16} class="mr-1" /> Run
-              </Button>
-            {/if}
-            {#if onFlowRuns}
-              <Button
-                onclick={(e) => {
-                  e.stopPropagation();
-                  onFlowRuns(flow.id);
-                }}
-                variant="outline"
-                size="sm"
-              >
-                <History size={16} class="mr-1" /> Runs
-              </Button>
-            {/if}
-            <Button
-              onclick={(e) => {
-                e.stopPropagation();
-                handleFlowClick(flow.id);
-              }}
-              variant="outline"
-              size="sm"
+    <div class="rounded-md border mt-4">
+      <table class="w-full border-collapse">
+        <thead>
+          <tr class="border-b">
+            <th class="p-3 text-left font-medium">Name</th>
+            <th class="p-3 text-left font-medium">Status</th>
+            <th class="p-3 text-left font-medium">Steps</th>
+            <th class="p-3 text-left font-medium">Created</th>
+            <th class="p-3 text-left font-medium">Updated</th>
+            <th class="p-3 text-left font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each flows as flow (flow.id)}
+            <tr 
+              class="border-b cursor-pointer transition-colors hover:bg-muted/50"
+              onclick={() => handleFlowClick(flow.id)}
             >
-              <Edit size={16} class="mr-1" /> Edit
-            </Button>
-            <Button
-              onclick={(e) => {
-                e.stopPropagation();
-                deleteFlow(flow.id, e);
-              }}
-              variant="outline"
-              size="sm"
-            >
-              <Trash2 size={16} class="mr-1" /> Delete
-            </Button>
-          </div>
-        </div>
-      {/each}
+              <td class="p-3 font-medium">{flow.name}</td>
+              <td class="p-3">
+                <span
+                  class="inline-block px-2 py-1 rounded text-xs font-medium text-white"
+                  style="background-color: {getStatusColor(flow.status)}"
+                >
+                  {flow.status || 'draft'}
+                </span>
+              </td>
+              <td class="p-3 text-sm">{flow.stepCount || 0}</td>
+              <td class="p-3 text-sm">
+                {flow.createdAt ? new Date(flow.createdAt).toLocaleString() : '-'}
+              </td>
+              <td class="p-3 text-sm">
+                {flow.updatedAt ? new Date(flow.updatedAt).toLocaleString() : '-'}
+              </td>
+              <td class="p-3">
+                <div class="flex gap-2 items-center">
+                  {#if onFlowRun}
+                    <Button
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        onFlowRun(flow.id);
+                      }}
+                      variant="default"
+                      size="sm"
+                      title="Run flow"
+                    >
+                      <Play size={14} class="mr-1" /> Run
+                    </Button>
+                  {/if}
+                  {#if onFlowRuns}
+                    <Button
+                      onclick={(e) => {
+                        e.stopPropagation();
+                        onFlowRuns(flow.id);
+                      }}
+                      variant="outline"
+                      size="sm"
+                      title="View flow runs"
+                    >
+                      <History size={14} class="mr-1" /> Runs
+                    </Button>
+                  {/if}
+                  <Button
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      handleFlowClick(flow.id);
+                    }}
+                    variant="outline"
+                    size="sm"
+                    title="Edit flow"
+                  >
+                    <Edit size={14} class="mr-1" /> Edit
+                  </Button>
+                  <Button
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      deleteFlow(flow.id, e);
+                    }}
+                    variant="secondary"
+                    size="sm"
+                    title="Delete flow"
+                  >
+                    <Trash2 size={14} class="mr-1" /> Delete
+                  </Button>
+                </div>
+              </td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
     </div>
   {/if}
 </div>
@@ -201,71 +203,5 @@
     margin-bottom: 1.5rem;
   }
 
-  .flow-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
-    gap: 1rem;
-  }
-
-  .flow-item {
-    border: 1px solid #e5e7eb;
-    border-radius: 8px;
-    padding: 1rem;
-    cursor: pointer;
-    transition: all 0.2s;
-    background: white;
-    display: flex;
-    justify-content: space-between;
-    align-items: flex-start;
-  }
-
-  .flow-item:hover {
-    border-color: #3b82f6;
-    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-  }
-
-  .flow-item-content {
-    flex: 1;
-  }
-
-  .flow-item-header {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    margin-bottom: 0.5rem;
-  }
-
-  .flow-item-name {
-    font-size: 1.125rem;
-    font-weight: 600;
-    margin: 0;
-  }
-
-  .flow-status-badge {
-    padding: 0.25rem 0.5rem;
-    border-radius: 4px;
-    font-size: 0.75rem;
-    font-weight: 500;
-    color: white;
-    text-transform: capitalize;
-  }
-
-  .flow-item-description {
-    color: #6b7280;
-    font-size: 0.875rem;
-    margin: 0.5rem 0;
-  }
-
-  .flow-item-meta {
-    display: flex;
-    gap: 1rem;
-    margin-top: 0.5rem;
-  }
-
-  .flow-item-actions {
-    display: flex;
-    gap: 0.5rem;
-    margin-left: 1rem;
-  }
 </style>
 
