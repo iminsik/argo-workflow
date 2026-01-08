@@ -397,8 +397,8 @@
         onnodesdelete={onNodesDelete}
         onconnect={onConnect}
         fitView
+        proOptions={{ hideAttribution: true }}
       >
-        <Background />
         <Controls />
         <MiniMap />
       </SvelteFlow>
@@ -567,6 +567,11 @@
     height: 100%;
   }
   
+  /* Shift viewport to the right by (1/4 + 1/8) = 3/8 of the width */
+  :global(.flow-canvas .svelte-flow__viewport) {
+    transform: translateX(37.5%) !important;
+  }
+  
   /* Make nodes narrower for better centering */
   :global(.flow-canvas .svelte-flow__node) {
     width: 120px !important;
@@ -580,6 +585,26 @@
     text-align: center !important;
     word-wrap: break-word;
     overflow-wrap: break-word;
+  }
+  
+  /* Position minimap at bottom left corner */
+  :global(.flow-canvas .svelte-flow__minimap) {
+    position: absolute !important;
+    bottom: 10px !important;
+    left: 10px !important;
+    top: auto !important;
+    right: auto !important;
+  }
+  
+  /* Hide "Svelte Flow" text watermark */
+  :global(.flow-canvas .svelte-flow svg text) {
+    display: none !important;
+  }
+  
+  /* Re-show text inside nodes and edges */
+  :global(.flow-canvas .svelte-flow__node text),
+  :global(.flow-canvas .svelte-flow__edge text) {
+    display: block !important;
   }
 </style>
 
