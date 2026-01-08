@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { Plus, Trash2, Edit, Play } from 'lucide-svelte';
+  import { Plus, Trash2, Edit, Play, History } from 'lucide-svelte';
   import Button from '$lib/components/ui/button.svelte';
   import type { Flow } from '$lib/flow/types';
 
@@ -8,9 +8,11 @@
     onFlowSelect?: (flowId: string) => void;
     onFlowCreate?: () => void;
     onFlowSaved?: () => void;
+    onFlowRun?: (flowId: string) => void;
+    onFlowRuns?: (flowId: string) => void;
   }
 
-  let { onFlowSelect, onFlowCreate, onFlowSaved }: Props = $props();
+  let { onFlowSelect, onFlowCreate, onFlowSaved, onFlowRun, onFlowRuns }: Props = $props();
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
   let flows = $state<Flow[]>([]);
@@ -100,6 +102,12 @@
         <div
           class="flow-item"
           onclick={() => handleFlowClick(flow.id)}
+          onkeydown={(e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault();
+              handleFlowClick(flow.id);
+            }
+          }}
           role="button"
           tabindex="0"
         >
@@ -125,16 +133,50 @@
               </span>
             </div>
           </div>
-          <div class="flow-item-actions" onclick={(e) => e.stopPropagation()}>
+          <div 
+            class="flow-item-actions" 
+            role="group"
+            aria-label="Flow actions"
+          >
+            {#if onFlowRun}
+              <Button
+                onclick={(e) => {
+                  e.stopPropagation();
+                  onFlowRun(flow.id);
+                }}
+                variant="default"
+                size="sm"
+              >
+                <Play size={16} class="mr-1" /> Run
+              </Button>
+            {/if}
+            {#if onFlowRuns}
+              <Button
+                onclick={(e) => {
+                  e.stopPropagation();
+                  onFlowRuns(flow.id);
+                }}
+                variant="outline"
+                size="sm"
+              >
+                <History size={16} class="mr-1" /> Runs
+              </Button>
+            {/if}
             <Button
-              onclick={() => handleFlowClick(flow.id)}
+              onclick={(e) => {
+                e.stopPropagation();
+                handleFlowClick(flow.id);
+              }}
               variant="outline"
               size="sm"
             >
               <Edit size={16} class="mr-1" /> Edit
             </Button>
             <Button
-              onclick={(e) => deleteFlow(flow.id, e)}
+              onclick={(e) => {
+                e.stopPropagation();
+                deleteFlow(flow.id, e);
+              }}
               variant="outline"
               size="sm"
             >

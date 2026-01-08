@@ -11,9 +11,10 @@
     flowName?: string;
     onSave?: (flow: { name: string; steps: FlowStep[]; edges: FlowEdge[] }) => void;
     onClose?: () => void;
+    onRun?: (flowId: string) => void;
   }
 
-  let { flowId, flowName = 'New Flow', onSave, onClose }: Props = $props();
+  let { flowId, flowName = 'New Flow', onSave, onClose, onRun }: Props = $props();
 
   const apiUrl = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -27,7 +28,27 @@
   let currentStepId = $state('');
   let currentStepDependencies = $state('');
   let saving = $state(false);
-  let flowNameInput = $state(flowName);
+  let running = $state(false);
+  // Initialize state with default values to avoid capturing initial prop values
+  let flowNameInput = $state('');
+  let savedFlowId = $state<string | null>(null);
+  
+  // Sync props to state using $effect - this properly tracks prop changes
+  $effect(() => {
+    // Access props inside effect to create reactive dependency
+    const currentFlowName = flowName || 'New Flow';
+    const currentFlowId = flowId;
+    
+    // Only update if different to avoid unnecessary updates
+    if (currentFlowName !== flowNameInput) {
+      flowNameInput = currentFlowName;
+    }
+    
+    const newFlowId = currentFlowId || null;
+    if (newFlowId !== savedFlowId) {
+      savedFlowId = newFlowId;
+    }
+  });
 
   // Load flow if flowId provided
   onMount(async () => {
@@ -86,18 +107,38 @@
       }
     };
     nodes = [...nodes, newNode];
+    
+    // Automatically open editor for the new node
+    // Use setTimeout to ensure reactive updates happen
+    setTimeout(() => {
+      selectedNodeId = newNodeId;
+      currentStepId = newNodeId;
+      currentStepName = newNode.data.label;
+      currentStepCode = newNode.data.pythonCode;
+      currentStepDependencies = newNode.data.dependencies;
+      showStepEditor = true;
+    }, 50);
   }
 
   function onNodeClick(event: any) {
-    const node = event.node;
-    if (node) {
+    // Handle both event formats from @xyflow/svelte
+    const node = event.detail?.node || event.node || event;
+    if (node && node.id) {
+      // Update all state
       selectedNodeId = node.id;
       currentStepId = node.id;
-      currentStepName = node.data.label;
-      currentStepCode = node.data.pythonCode || "print('Hello from step')";
-      currentStepDependencies = node.data.dependencies || '';
+      currentStepName = node.data?.label || `Step ${node.id}`;
+      currentStepCode = node.data?.pythonCode || "print('Hello from step')";
+      currentStepDependencies = node.data?.dependencies || '';
+      
+      // Open the editor panel
       showStepEditor = true;
     }
+  }
+
+  function onNodeDoubleClick(event: any) {
+    // Double-click also opens editor (alternative to single click)
+    onNodeClick(event);
   }
 
   function onNodesDelete(deleted: Node[]) {
@@ -141,7 +182,7 @@
     });
 
     showStepEditor = false;
-    selectedNodeId = null;
+    // Don't clear selectedNodeId - allow reopening the same node
   }
 
   async function saveFlow() {
@@ -199,6 +240,7 @@
         }
 
         const saved = await res.json();
+        savedFlowId = saved.id;
         alert(`Flow saved successfully: ${saved.id}`);
         if (onSave) {
           await onSave({
@@ -219,25 +261,62 @@
 
   function closeStepEditor() {
     showStepEditor = false;
-    selectedNodeId = null;
+    // Don't clear selectedNodeId - allow reopening the same node
+  }
+
+  async function runFlow() {
+    const flowIdToRun = savedFlowId || flowId;
+    if (!flowIdToRun) {
+      alert('Please save the flow before running it');
+      return;
+    }
+
+    running = true;
+    try {
+      const res = await fetch(`${apiUrl}/api/v1/flows/${flowIdToRun}/run`, {
+        method: 'POST',
+      });
+
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.detail || 'Failed to run flow');
+      }
+
+      const result = await res.json();
+      alert(`Flow started successfully: ${result.message}`);
+      
+      if (onRun) {
+        onRun(flowIdToRun);
+      }
+    } catch (error) {
+      console.error('Failed to run flow:', error);
+      alert('Failed to run flow: ' + (error instanceof Error ? error.message : 'Unknown error'));
+    } finally {
+      running = false;
+    }
   }
 </script>
 
 <div class="flow-editor-container">
-  <div class="flow-editor-header">
-    <input
-      type="text"
-      bind:value={flowNameInput}
-      placeholder="Flow Name"
-      class="flow-name-input"
-    />
-    <div class="flow-editor-actions">
-      <Button onclick={addNode} variant="outline" size="sm">
-        + Add Step
-      </Button>
+    <div class="flow-editor-header">
+      <input
+        type="text"
+        bind:value={flowNameInput}
+        placeholder="Flow Name"
+        class="flow-name-input"
+      />
+      <div class="flow-editor-actions">
+        <Button onclick={addNode} variant="outline" size="sm" title="Add a new step (editor will open automatically)">
+          + Add Step
+        </Button>
       <Button onclick={saveFlow} disabled={saving} variant="default">
         {saving ? 'Saving...' : 'Save Flow'}
       </Button>
+      {#if (savedFlowId || flowId) && onRun}
+        <Button onclick={runFlow} disabled={running} variant="default">
+          {running ? 'Running...' : 'Run Flow'}
+        </Button>
+      {/if}
       {#if onClose}
         <Button onclick={onClose} variant="outline">
           Close
@@ -248,10 +327,16 @@
 
   <div class="flow-editor-content">
     <div class="flow-canvas">
+      <div class="canvas-hint">
+        <p class="text-sm text-muted-foreground">
+          💡 Click or double-click on any step node to edit it
+        </p>
+      </div>
       <SvelteFlow
         {nodes}
         {edges}
         on:nodeclick={onNodeClick}
+        on:nodedoubleclick={onNodeDoubleClick}
         on:nodesdelete={onNodesDelete}
         on:connect={onConnect}
         fitView
@@ -263,15 +348,19 @@
     </div>
 
     {#if showStepEditor}
-      <div class="step-editor-panel">
+      <div class="step-editor-panel" role="region" aria-label="Step Editor">
         <div class="step-editor-header">
-          <h3>Edit Step: {currentStepName}</h3>
-          <Button onclick={closeStepEditor} variant="outline" size="sm">×</Button>
+          <div>
+            <h3>Edit Step: {currentStepName}</h3>
+            <p class="text-xs text-muted-foreground">Step ID: {currentStepId}</p>
+          </div>
+          <Button onclick={closeStepEditor} variant="outline" size="sm" title="Close editor">×</Button>
         </div>
         <div class="step-editor-content">
           <div class="mb-4">
-            <label class="block text-sm font-medium mb-2">Step Name</label>
+            <label for="step-name-input" class="block text-sm font-medium mb-2">Step Name</label>
             <input
+              id="step-name-input"
               type="text"
               bind:value={currentStepName}
               class="w-full px-3 py-2 border rounded"
@@ -279,8 +368,9 @@
             />
           </div>
           <div class="mb-4">
-            <label class="block text-sm font-medium mb-2">Dependencies (optional)</label>
+            <label for="step-dependencies-input" class="block text-sm font-medium mb-2">Dependencies (optional)</label>
             <input
+              id="step-dependencies-input"
               type="text"
               bind:value={currentStepDependencies}
               class="w-full px-3 py-2 border rounded"
@@ -288,8 +378,8 @@
             />
           </div>
           <div class="mb-4">
-            <label class="block text-sm font-medium mb-2">Python Code</label>
-            <div class="code-editor-container">
+            <label for="step-code-editor" class="block text-sm font-medium mb-2">Python Code</label>
+            <div id="step-code-editor" class="code-editor-container">
               <MonacoEditor bind:value={currentStepCode} language="python" theme="vs-dark" height="400px" />
             </div>
           </div>
@@ -309,6 +399,7 @@
     flex-direction: column;
     height: 100%;
     width: 100%;
+    min-height: 0;
   }
 
   .flow-editor-header {
@@ -345,15 +436,33 @@
     flex: 1;
     position: relative;
     background: #f9fafb;
+    min-width: 0;
+  }
+
+
+  .canvas-hint {
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    z-index: 10;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 8px 12px;
+    border-radius: 4px;
+    border: 1px solid #e5e7eb;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
   }
 
   .step-editor-panel {
     width: 500px;
+    min-width: 500px;
+    max-width: 500px;
     border-left: 1px solid #e5e7eb;
     background: white;
-    display: flex;
+    display: flex !important;
     flex-direction: column;
     overflow: hidden;
+    flex-shrink: 0;
+    z-index: 100;
   }
 
   .step-editor-header {

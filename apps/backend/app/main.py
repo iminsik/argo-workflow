@@ -13,6 +13,7 @@ from app.database import init_db, get_db, TaskLog, Task, TaskRun, SessionLocal, 
 # Hera SDK integration (required)
 try:
     from app.workflow_hera import create_workflow_with_hera  # type: ignore
+    from app.workflow_hera_flow import create_flow_workflow_with_hera  # type: ignore
 except ImportError as e:
     raise ImportError(f"Hera SDK is required but not available: {e}. Please install hera: poetry add hera")
 
@@ -2794,5 +2795,285 @@ async def delete_flow(flow_id: str, db: Session = Depends(get_db)):
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"Failed to delete flow: {str(e)}")
+    finally:
+        db.close()
+
+
+# ============================================================================
+# Flow Execution API Endpoints
+# ============================================================================
+
+@app.post("/api/v1/flows/{flow_id}/run")
+async def run_flow(flow_id: str, db: Session = Depends(get_db)):
+    """Run entire flow."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Load flow from database
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        # Check if flow already has a running workflow
+        latest_run = db.query(FlowRun).filter(
+            FlowRun.flow_id == flow_id
+        ).order_by(FlowRun.run_number.desc()).first()
+        
+        if latest_run and latest_run.phase in ["Running", "Pending"]:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Flow {flow_id} already has a running workflow (run #{latest_run.run_number}). Please wait for it to complete or cancel it first."
+            )
+        
+        # Get flow definition
+        definition = flow.definition if isinstance(flow.definition, dict) else {}
+        if not definition:
+            raise HTTPException(
+                status_code=400,
+                detail="Flow definition is empty"
+            )
+        
+        # Create and submit workflow
+        workflow_id = create_flow_workflow_with_hera(
+            flow_definition=definition,
+            namespace=namespace
+        )
+        
+        # Get next run number
+        max_run = db.query(FlowRun).filter(FlowRun.flow_id == flow_id).order_by(FlowRun.run_number.desc()).first()
+        next_run_number = (max_run.run_number + 1) if max_run else 1
+        
+        # Create FlowRun record
+        flow_run = FlowRun(
+            flow_id=flow_id,
+            workflow_id=workflow_id,
+            run_number=next_run_number,
+            phase="Pending",
+            started_at=datetime.utcnow()
+        )
+        db.add(flow_run)
+        db.commit()
+        db.refresh(flow_run)
+        
+        # Create FlowStepRun records for each step
+        steps = definition.get("steps", [])
+        for step in steps:
+            step_id = step.get("id")
+            if step_id:
+                # Argo workflow node name is typically the step ID
+                step_run = FlowStepRun(
+                    flow_run_id=flow_run.id,
+                    step_id=step_id,
+                    workflow_node_id=step_id,
+                    phase="Pending"
+                )
+                db.add(step_run)
+        
+        db.commit()
+        
+        return {
+            "id": flow_run.id,
+            "flowId": flow_id,
+            "workflowId": workflow_id,
+            "runNumber": next_run_number,
+            "phase": "Pending",
+            "message": f"Flow {flow_id} started successfully (run #{next_run_number})"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        db.rollback()
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to run flow: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.post("/api/v1/flows/{flow_id}/steps/{step_id}/run")
+async def run_flow_step(flow_id: str, step_id: str, db: Session = Depends(get_db)):
+    """Run a single step from a flow (for testing)."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Load flow from database
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        # Get flow definition
+        definition = flow.definition if isinstance(flow.definition, dict) else {}
+        steps = definition.get("steps", [])
+        
+        # Find the step
+        step = next((s for s in steps if s.get("id") == step_id), None)
+        if not step:
+            raise HTTPException(status_code=404, detail=f"Step {step_id} not found in flow {flow_id}")
+        
+        # Create a single-step workflow for this step
+        python_code = step.get("pythonCode", "")
+        dependencies = step.get("dependencies")
+        requirements_file = step.get("requirementsFile")
+        
+        # Create workflow using single-step function
+        workflow_id = create_workflow_with_hera(
+            python_code=python_code,
+            dependencies=dependencies,
+            requirements_file=requirements_file,
+            namespace=namespace
+        )
+        
+        return {
+            "workflowId": workflow_id,
+            "stepId": step_id,
+            "message": f"Step {step_id} from flow {flow_id} started successfully"
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to run step: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/flows/{flow_id}/runs")
+async def list_flow_runs(flow_id: str, db: Session = Depends(get_db)):
+    """List all runs for a flow."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        runs = db.query(FlowRun).filter(
+            FlowRun.flow_id == flow_id
+        ).order_by(FlowRun.run_number.desc()).all()
+        
+        return {
+            "runs": [
+                {
+                    "id": run.id,
+                    "runNumber": run.run_number,
+                    "workflowId": run.workflow_id,
+                    "phase": run.phase,
+                    "startedAt": run.started_at.isoformat() if run.started_at else None,
+                    "finishedAt": run.finished_at.isoformat() if run.finished_at else None,
+                    "createdAt": run.created_at.isoformat()
+                }
+                for run in runs
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to list flow runs: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/flows/{flow_id}/runs/{run_number}")
+async def get_flow_run(flow_id: str, run_number: int, db: Session = Depends(get_db)):
+    """Get flow run details."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        flow_run = db.query(FlowRun).filter(
+            FlowRun.flow_id == flow_id,
+            FlowRun.run_number == run_number
+        ).first()
+        
+        if not flow_run:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flow run {run_number} not found for flow {flow_id}"
+            )
+        
+        # Get step runs
+        step_runs = db.query(FlowStepRun).filter(
+            FlowStepRun.flow_run_id == flow_run.id
+        ).all()
+        
+        return {
+            "id": flow_run.id,
+            "flowId": flow_id,
+            "runNumber": flow_run.run_number,
+            "workflowId": flow_run.workflow_id,
+            "phase": flow_run.phase,
+            "startedAt": flow_run.started_at.isoformat() if flow_run.started_at else None,
+            "finishedAt": flow_run.finished_at.isoformat() if flow_run.finished_at else None,
+            "createdAt": flow_run.created_at.isoformat(),
+            "stepRuns": [
+                {
+                    "id": sr.id,
+                    "stepId": sr.step_id,
+                    "workflowNodeId": sr.workflow_node_id,
+                    "phase": sr.phase,
+                    "startedAt": sr.started_at.isoformat() if sr.started_at else None,
+                    "finishedAt": sr.finished_at.isoformat() if sr.finished_at else None,
+                }
+                for sr in step_runs
+            ]
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get flow run: {str(e)}")
+    finally:
+        db.close()
+
+
+@app.get("/api/v1/flows/{flow_id}/runs/{run_number}/logs")
+async def get_flow_run_logs(flow_id: str, run_number: int, db: Session = Depends(get_db)):
+    """Get logs for a flow run."""
+    try:
+        flow = db.query(Flow).filter(Flow.id == flow_id).first()
+        if not flow:
+            raise HTTPException(status_code=404, detail=f"Flow {flow_id} not found")
+        
+        flow_run = db.query(FlowRun).filter(
+            FlowRun.flow_id == flow_id,
+            FlowRun.run_number == run_number
+        ).first()
+        
+        if not flow_run:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Flow run {run_number} not found for flow {flow_id}"
+            )
+        
+        # Get step runs and their logs
+        step_runs = db.query(FlowStepRun).filter(
+            FlowStepRun.flow_run_id == flow_run.id
+        ).all()
+        
+        logs = []
+        for step_run in step_runs:
+            step_logs = db.query(FlowStepLog).filter(
+                FlowStepLog.step_run_id == step_run.id
+            ).order_by(FlowStepLog.created_at).all()
+            
+            for log_entry in step_logs:
+                logs.append({
+                    "stepId": step_run.step_id,
+                    "node": log_entry.node_id,
+                    "pod": log_entry.pod_name,
+                    "phase": log_entry.phase,
+                    "logs": log_entry.logs
+                })
+        
+        return {"logs": logs}
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get flow run logs: {str(e)}")
     finally:
         db.close()

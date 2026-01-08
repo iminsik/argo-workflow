@@ -7,6 +7,7 @@
   import PVFileManager from './PVFileManager.svelte';
   import FlowList from './FlowList.svelte';
   import FlowEditor from './FlowEditor.svelte';
+  import FlowRunsDialog from './FlowRunsDialog.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
 
@@ -48,6 +49,8 @@
   let showFlowEditor = $state(false);
   let selectedFlowId = $state<string | null>(null);
   let flowListKey = $state(0); // Force re-render of FlowList
+  let showFlowRuns = $state(false);
+  let selectedFlowForRuns = $state<string | null>(null);
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
@@ -812,6 +815,54 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
       onFlowSaved={() => {
         flowListKey += 1; // Refresh FlowList
       }}
+      onFlowRun={async (flowId) => {
+        try {
+          const res = await fetch(`${apiUrl}/api/v1/flows/${flowId}/run`, {
+            method: 'POST',
+          });
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.detail || 'Failed to run flow');
+          }
+          const result = await res.json();
+          alert(`Flow started successfully: ${result.message}`);
+          flowListKey += 1; // Refresh list to show updated status
+        } catch (error) {
+          console.error('Failed to run flow:', error);
+          alert('Failed to run flow: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        }
+      }}
+      onFlowRuns={(flowId) => {
+        selectedFlowForRuns = flowId;
+        showFlowRuns = true;
+      }}
+    />
+  {/if}
+
+  {#if showFlowRuns && selectedFlowForRuns}
+    <FlowRunsDialog
+      flowId={selectedFlowForRuns}
+      open={showFlowRuns}
+      onClose={() => {
+        showFlowRuns = false;
+        selectedFlowForRuns = null;
+      }}
+      onRun={async (flowId) => {
+        try {
+          const res = await fetch(`${apiUrl}/api/v1/flows/${flowId}/run`, {
+            method: 'POST',
+          });
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.detail || 'Failed to run flow');
+          }
+          const result = await res.json();
+          alert(`Flow started successfully: ${result.message}`);
+        } catch (error) {
+          console.error('Failed to run flow:', error);
+          alert('Failed to run flow: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        }
+      }}
     />
   {/if}
 
@@ -986,6 +1037,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
           onSave={async (flow) => {
             // Flow is saved via API in FlowEditor, just refresh the list
             flowListKey += 1;
+          }}
+          onRun={(flowId) => {
+            flowListKey += 1; // Refresh list after running
           }}
           onClose={() => {
             showFlowEditor = false;
