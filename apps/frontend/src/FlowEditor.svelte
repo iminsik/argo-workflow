@@ -32,16 +32,19 @@
   // Initialize state with default values to avoid capturing initial prop values
   let flowNameInput = $state('');
   let savedFlowId = $state<string | null>(null);
+  let lastPropFlowName = $state<string | undefined>(undefined);
   
   // Sync props to state using $effect - this properly tracks prop changes
+  // Only update when the prop actually changes, not when local state changes
   $effect(() => {
     // Access props inside effect to create reactive dependency
     const currentFlowName = flowName || 'New Flow';
     const currentFlowId = flowId;
     
-    // Only update if different to avoid unnecessary updates
-    if (currentFlowName !== flowNameInput) {
+    // Only update if the prop value actually changed (not if local state changed)
+    if (currentFlowName !== lastPropFlowName) {
       flowNameInput = currentFlowName;
+      lastPropFlowName = currentFlowName;
     }
     
     const newFlowId = currentFlowId || null;
@@ -353,7 +356,9 @@
 
 <div class="flow-editor-container">
     <div class="flow-editor-header">
+      <label for="flow-name-input" class="sr-only">Flow Name</label>
       <input
+        id="flow-name-input"
         type="text"
         bind:value={flowNameInput}
         placeholder="Flow Name"
