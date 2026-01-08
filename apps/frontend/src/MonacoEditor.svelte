@@ -42,6 +42,25 @@
   onMount(() => {
     if (!container) return;
 
+    // Configure Monaco to suppress web worker warnings
+    // Use getWorker to provide a minimal inline worker instead of getWorkerUrl
+    // This prevents Monaco from trying to load workers from URLs
+    if (typeof window !== 'undefined' && (window as any).MonacoEnvironment === undefined) {
+      // Create a minimal worker function that does nothing
+      // This prevents Monaco from trying to load workers from URLs
+      const createMinimalWorker = () => {
+        const workerCode = `self.onmessage = function() {};`;
+        const blob = new Blob([workerCode], { type: 'application/javascript' });
+        return new Worker(URL.createObjectURL(blob));
+      };
+      
+      (window as any).MonacoEnvironment = {
+        getWorker: function (_workerId: string, _label: string) {
+          return createMinimalWorker();
+        }
+      };
+    }
+
     editorInstance = monaco.editor.create(container, {
       value,
       language,

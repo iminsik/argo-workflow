@@ -1,7 +1,7 @@
 """
 Database configuration and models for storing task logs.
 """
-from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey
+from sqlalchemy import create_engine, String, Text, DateTime, Integer, ForeignKey, JSON
 from sqlalchemy.orm import DeclarativeBase, sessionmaker, Session, relationship, Mapped, mapped_column
 from datetime import datetime
 from typing import Generator
@@ -84,6 +84,86 @@ class TaskLog(Base):
     
     def __repr__(self):
         return f"<TaskLog(run_id={self.run_id}, pod={self.pod_name}, phase={self.phase})>"
+
+
+class Flow(Base):
+    """Model for storing flow definitions (DAGs)."""
+    __tablename__ = "flows"
+    
+    id: Mapped[str] = mapped_column(String, primary_key=True, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    definition: Mapped[dict] = mapped_column(JSON, nullable=False)  # FlowStep[] + edges
+    status: Mapped[str] = mapped_column(String, default="draft", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    runs: Mapped[list["FlowRun"]] = relationship("FlowRun", back_populates="flow", order_by="desc(FlowRun.run_number)", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<Flow(id={self.id}, name={self.name}, status={self.status})>"
+
+
+class FlowRun(Base):
+    """Model for storing flow execution runs."""
+    __tablename__ = "flow_runs"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    flow_id: Mapped[str] = mapped_column(String, ForeignKey("flows.id", ondelete="CASCADE"), index=True, nullable=False)
+    workflow_id: Mapped[str] = mapped_column(String, index=True, nullable=False)  # Argo workflow name
+    run_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False, default="Pending")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    
+    # Relationships
+    flow: Mapped["Flow"] = relationship("Flow", back_populates="runs")
+    step_runs: Mapped[list["FlowStepRun"]] = relationship("FlowStepRun", back_populates="flow_run", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<FlowRun(id={self.id}, flow_id={self.flow_id}, run_number={self.run_number}, workflow_id={self.workflow_id}, phase={self.phase})>"
+
+
+class FlowStepRun(Base):
+    """Model for storing individual step execution within a flow run."""
+    __tablename__ = "flow_step_runs"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    flow_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("flow_runs.id", ondelete="CASCADE"), index=True, nullable=False)
+    step_id: Mapped[str] = mapped_column(String, nullable=False)  # Step ID from flow definition
+    workflow_node_id: Mapped[str] = mapped_column(String, nullable=False)  # Argo workflow node name
+    phase: Mapped[str] = mapped_column(String, nullable=False, default="Pending")
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    
+    # Relationships
+    flow_run: Mapped["FlowRun"] = relationship("FlowRun", back_populates="step_runs")
+    logs: Mapped[list["FlowStepLog"]] = relationship("FlowStepLog", back_populates="step_run", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<FlowStepRun(id={self.id}, flow_run_id={self.flow_run_id}, step_id={self.step_id}, phase={self.phase})>"
+
+
+class FlowStepLog(Base):
+    """Model for storing step logs within a flow run."""
+    __tablename__ = "flow_step_logs"
+    
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, index=True, autoincrement=True)
+    step_run_id: Mapped[int] = mapped_column(Integer, ForeignKey("flow_step_runs.id", ondelete="CASCADE"), index=True, nullable=False)
+    node_id: Mapped[str] = mapped_column(String, nullable=False)
+    pod_name: Mapped[str] = mapped_column(String, nullable=False)
+    phase: Mapped[str] = mapped_column(String, nullable=False)
+    logs: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    
+    # Relationship
+    step_run: Mapped["FlowStepRun"] = relationship("FlowStepRun", back_populates="logs")
+    
+    def __repr__(self):
+        return f"<FlowStepLog(step_run_id={self.step_run_id}, pod={self.pod_name}, phase={self.phase})>"
 
 
 def init_db():

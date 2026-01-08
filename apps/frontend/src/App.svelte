@@ -5,8 +5,12 @@
   import TaskRow from './TaskRow.svelte';
   import TaskDialog from './TaskDialog.svelte';
   import PVFileManager from './PVFileManager.svelte';
+  import FlowList from './FlowList.svelte';
+  import FlowEditor from './FlowEditor.svelte';
+  import FlowRunsDialog from './FlowRunsDialog.svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
+  import { initRouter, navigateTo, getCurrentPath } from './routes';
 
   interface Task {
     id: string;
@@ -42,6 +46,36 @@
   let loadingLogs = $state(false);
   let showSubmitModal = $state(false);
   let showPVFileManager = $state(false);
+  
+  // Determine active view from URL
+  function getViewFromPath(path: string): 'tasks' | 'flows' {
+    if (path === '/flows' || path.startsWith('/flows/')) {
+      return 'flows';
+    }
+    return 'tasks'; // Default to tasks
+  }
+  
+  let currentPath = $state(getCurrentPath());
+  let activeView = $derived(getViewFromPath(currentPath));
+  let showFlowEditor = $state(false);
+  let selectedFlowId = $state<string | null>(null);
+  
+  // Update URL when flow editor opens/closes
+  $effect(() => {
+    if (showFlowEditor && selectedFlowId) {
+      // Update URL to /flows/{flow_id}
+      navigateTo(`/flows/${selectedFlowId}`);
+    } else if (showFlowEditor && !selectedFlowId) {
+      // New flow - update URL to /flows/new
+      navigateTo('/flows/new');
+    } else if (!showFlowEditor && currentPath.startsWith('/flows/')) {
+      // Flow editor closed - navigate back to /flows
+      navigateTo('/flows');
+    }
+  });
+  let flowListKey = $state(0); // Force re-render of FlowList
+  let showFlowRuns = $state(false);
+  let selectedFlowForRuns = $state<string | null>(null);
   const defaultPythonCode = "print('Processing task in Kind...')";
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
@@ -688,6 +722,44 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
   });
 
   onMount(() => {
+    // Initialize router
+    initRouter((path) => {
+      currentPath = path;
+      
+      // Redirect root to /tasks
+      if (path === '/') {
+        navigateTo('/tasks');
+        currentPath = '/tasks';
+        return;
+      }
+      
+      // Handle /flows/{flow_id} route - open flow editor
+      const flowMatch = path.match(/^\/flows\/(.+)$/);
+      if (flowMatch && flowMatch[1] !== 'new') {
+        const flowId = flowMatch[1];
+        if (selectedFlowId !== flowId) {
+          selectedFlowId = flowId;
+          showFlowEditor = true;
+        }
+      } else if (path === '/flows/new') {
+        // Handle /flows/new route - open new flow editor
+        if (!showFlowEditor || selectedFlowId !== null) {
+          selectedFlowId = null;
+          showFlowEditor = true;
+        }
+      } else if (path === '/flows' && showFlowEditor) {
+        // If we're on /flows and editor is open, close it
+        showFlowEditor = false;
+        selectedFlowId = null;
+      }
+    });
+    
+    // Redirect root to /tasks if needed
+    if (getCurrentPath() === '/') {
+      navigateTo('/tasks');
+      currentPath = '/tasks';
+    }
+    
     fetchTasks(true);
     
     // Set up periodic task status updates
@@ -708,6 +780,20 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
 <div class="container mx-auto p-8 max-w-7xl">
   <div class="flex justify-between items-center mb-8">
     <h1 class="text-3xl font-bold">Argo Workflow Manager</h1>
+    <div class="flex gap-2">
+      <Button
+        onclick={() => navigateTo('/tasks')}
+        variant={activeView === 'tasks' ? 'default' : 'outline'}
+      >
+        Tasks
+      </Button>
+      <Button
+        onclick={() => navigateTo('/flows')}
+        variant={activeView === 'flows' ? 'default' : 'outline'}
+      >
+        Flows
+      </Button>
+    </div>
     <div class="flex gap-2">
       <Button 
         onclick={() => fetchTasks(true)} 
@@ -731,8 +817,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
     </div>
   </div>
 
-  <div class="mt-8">
-    <h2 class="text-2xl font-semibold mb-4">Submitted Tasks</h2>
+  {#if activeView === 'tasks'}
+    <div class="mt-8">
+      <h2 class="text-2xl font-semibold mb-4">Submitted Tasks</h2>
     {#if initialLoading && tasks.length === 0}
       <p class="text-muted-foreground">Loading tasks...</p>
     {:else if tasks.length === 0}
@@ -776,7 +863,71 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         </table>
       </div>
     {/if}
-  </div>
+    </div>
+  {:else if activeView === 'flows'}
+    <FlowList
+      key={flowListKey}
+      onFlowSelect={(flowId) => {
+        selectedFlowId = flowId;
+        showFlowEditor = true;
+      }}
+      onFlowCreate={() => {
+        selectedFlowId = null;
+        showFlowEditor = true;
+      }}
+      onFlowSaved={() => {
+        flowListKey += 1; // Refresh FlowList
+      }}
+      onFlowRun={async (flowId) => {
+        try {
+          const res = await fetch(`${apiUrl}/api/v1/flows/${flowId}/run`, {
+            method: 'POST',
+          });
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.detail || 'Failed to run flow');
+          }
+          const result = await res.json();
+          alert(`Flow started successfully: ${result.message}`);
+          flowListKey += 1; // Refresh list to show updated status
+        } catch (error) {
+          console.error('Failed to run flow:', error);
+          alert('Failed to run flow: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        }
+      }}
+      onFlowRuns={(flowId) => {
+        selectedFlowForRuns = flowId;
+        showFlowRuns = true;
+      }}
+    />
+  {/if}
+
+  {#if showFlowRuns && selectedFlowForRuns}
+    <FlowRunsDialog
+      flowId={selectedFlowForRuns}
+      open={showFlowRuns}
+      onClose={() => {
+        showFlowRuns = false;
+        selectedFlowForRuns = null;
+      }}
+      onRun={async (flowId) => {
+        try {
+          const res = await fetch(`${apiUrl}/api/v1/flows/${flowId}/run`, {
+            method: 'POST',
+          });
+          if (!res.ok) {
+            const error = await res.json();
+            throw new Error(error.detail || 'Failed to run flow');
+          }
+          const result = await res.json();
+          alert(`Flow started successfully: ${result.message}`);
+        } catch (error) {
+          console.error('Failed to run flow:', error);
+          alert('Failed to run flow: ' + (error instanceof Error ? error.message : 'Unknown error'));
+        }
+      }}
+    />
+  {/if}
 
   {#if selectedTask}
     <TaskDialog
@@ -939,4 +1090,28 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
       <PVFileManager />
     </div>
   </Dialog>
+
+  {#if showFlowEditor}
+    <div class="fixed inset-0 z-50 bg-black bg-opacity-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-lg shadow-xl w-full h-full max-w-[95vw] max-h-[95vh] flex flex-col">
+        <FlowEditor
+          flowId={selectedFlowId}
+          flowName={selectedFlowId ? undefined : 'New Flow'}
+          onSave={async (flow) => {
+            // Flow is saved via API in FlowEditor, just refresh the list
+            flowListKey += 1;
+          }}
+          onRun={(flowId) => {
+            flowListKey += 1; // Refresh list after running
+          }}
+          onClose={() => {
+            showFlowEditor = false;
+            selectedFlowId = null;
+            flowListKey += 1; // Refresh list when closing
+            // URL will be updated by the $effect above
+          }}
+        />
+      </div>
+    </div>
+  {/if}
 </div>
