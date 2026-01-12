@@ -4,6 +4,7 @@
   import Badge from '$lib/components/ui/badge.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
   import MonacoEditor from './MonacoEditor.svelte';
+  import { ansiToHtml } from '$lib/ansi-to-html';
 
   interface Run {
     id: number;
@@ -289,7 +290,13 @@
                 <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
               </div>
               <div class="text-[#d4d4d4] whitespace-pre-wrap break-words">
-                {logEntry.logs}
+                {#each ansiToHtml(logEntry.logs) as token}
+                  {#if token.classes.length > 0}
+                    <span class={token.classes.join(' ')}>{token.text}</span>
+                  {:else}
+                    {token.text}
+                  {/if}
+                {/each}
               </div>
             </div>
           {/each}

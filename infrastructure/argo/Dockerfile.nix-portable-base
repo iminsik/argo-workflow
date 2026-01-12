@@ -3,9 +3,21 @@
 
 FROM python:3.11-slim
 
+# Install curl (needed to download nix-portable)
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
 # Install nix-portable
-# Download the latest release from GitHub
-RUN curl -L https://github.com/DavHau/nix-portable/releases/download/v0.5.0/nix-portable \
+# Detect architecture and download appropriate binary
+RUN ARCH=$(uname -m) && \
+    if [ "$ARCH" = "x86_64" ]; then \
+        BINARY="nix-portable-x86_64"; \
+    elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then \
+        BINARY="nix-portable-aarch64"; \
+    else \
+        echo "Unsupported architecture: $ARCH" && exit 1; \
+    fi && \
+    curl -L "https://github.com/DavHau/nix-portable/releases/latest/download/${BINARY}" \
     -o /usr/local/bin/nix-portable && \
     chmod +x /usr/local/bin/nix-portable
 
@@ -17,7 +29,7 @@ ENV NIX_PORTABLE=1
 ENV PATH="/root/.nix-profile/bin:${PATH}"
 
 # Verify installations
-RUN nix-portable --version && uv --version
+RUN test -f /usr/local/bin/nix-portable && uv --version
 
 # Default command
 CMD ["python"]

@@ -1,4 +1,4 @@
-.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs cache-setup
+.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs cache-setup build-nix-image load-nix-image
 
 cluster-up:
 	kind create cluster --name argo-dev --config infrastructure/k8s/kind-config.yaml
@@ -8,6 +8,8 @@ cluster-up:
 	kubectl apply -f infrastructure/k8s/pv.yaml
 	kubectl apply -f infrastructure/k8s/pv-cache-volumes.yaml
 	kubectl apply -f infrastructure/k8s/pvc-cache-volumes.yaml
+	@echo "Building and loading nix-portable-base image..."
+	@$(MAKE) build-nix-image load-nix-image
 
 cluster-down:
 	kind delete cluster --name argo-dev
@@ -31,3 +33,11 @@ cache-setup: ## Create cache PVCs for UV and Nix (required for dependency cachin
 	kubectl apply -f infrastructure/k8s/pv-cache-volumes.yaml
 	kubectl apply -f infrastructure/k8s/pvc-cache-volumes.yaml
 	@echo "Cache PVCs created. Verify with: kubectl get pvc -n argo"
+
+build-nix-image: ## Build the nix-portable-base Docker image
+	@echo "Building nix-portable-base image..."
+	cd infrastructure/argo && docker build -f Dockerfile.nix-portable-base -t nix-portable-base:latest .
+
+load-nix-image: ## Load nix-portable-base image into kind cluster
+	@echo "Loading nix-portable-base image into kind cluster..."
+	kind load docker-image nix-portable-base:latest --name argo-dev || echo "Warning: Failed to load image. Make sure kind cluster is running."
