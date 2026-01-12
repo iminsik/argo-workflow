@@ -1,0 +1,57 @@
+==========================================
+Nix-Portable Environment Diagnostics
+==========================================
+
+1. macOS Version:
+ProductName:		macOS
+ProductVersion:		26.3
+BuildVersion:		25D5087f
+
+2. System Architecture:
+arm64
+arm64
+
+3. Docker Version:
+Docker version 27.5.1, build 9f9e405
+ Kernel Version: 6.12.5-linuxkit
+ Operating System: Docker Desktop
+ OSType: linux
+ Architecture: aarch64
+
+4. Docker Desktop Settings (if applicable):
+Docker Desktop settings file not found
+
+5. Kubernetes/Kind Version:
+Client Version: v1.35.0
+kind v0.31.0 go1.25.5 darwin/arm64
+
+6. Kind Cluster Info (if running):
+argo-dev
+Cluster: argo-dev
+NAME                     STATUS   ROLES           AGE   VERSION   INTERNAL-IP   EXTERNAL-IP   OS-IMAGE                         KERNEL-VERSION    CONTAINER-RUNTIME
+argo-dev-control-plane   Ready    control-plane   74m   v1.35.0   172.22.0.2    <none>        Debian GNU/Linux 12 (bookworm)   6.12.5-linuxkit   containerd://2.2.0
+  OS Image:                   Debian GNU/Linux 12 (bookworm)
+  Operating System:           linux
+  Architecture:               arm64
+
+7. Container Runtime Info:
+ Runtimes: io.containerd.runc.v2 runc
+ Default Runtime: runc
+
+8. File System Type (for Docker volumes):
+
+9. Security Settings:
+SIP Status:
+System Integrity Protection status: enabled.
+
+10. Docker Container Test (nix-portable binary):
+Testing nix-portable in a container...
+Unable to find image 'python:3.11-slim' locally
+3.11-slim: Pulling from library/python
+Digest: sha256:1dd3dca85e22886e44fcad1bb7ccab6691dfa83db52214cf9e20696e095f3e36
+Status: Downloaded newer image for python:3.11-slim
+  % Total    % Received % Xferd  Average Speed   Time    Time     Time  Current
+                                 Dload  Upload   Total   Spent    Left  Speed
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  0     0    0     0    0     0      0      0 --:--:-- --:--:-- --:--:--     0
+  5 64.9M    5 3327k    0     0  2736k      0  0:00:24  0:00:01  0:00:23 2736k 20 64.9M   20 13.1M    0     0  6059k      0  0:00:10  0:00:02  0:00:08  9.8M 34 64.9M   34 22.4M    0     0  7152k      0  0:00:09  0:00:03  0:00:06 9841k 49 64.9M   49 32.2M    0     0  7837k      0  0:00:08  0:00:04  0:00:04 9904k 66 64.9M   66 42.8M    0     0  8407k      0  0:00:07  0:00:05  0:00:02  9.8M 78 64.9M   78 50.9M    0     0  8392k      0  0:00:07  0:00:06  0:00:01 9768k 87 64.9M   87 56.6M    0     0  8026k      0  0:00:08  0:00:07  0:00:01 8897k 98 64.9M   98 63.9M    0     0  7907k      0  0:00:08  0:00:08 --:--:-- 8388k100 64.9M  100 64.9M    0     0  8011k      0  0:00:08  0:00:08 --:--:-- 8192k
