@@ -1,4 +1,10 @@
-.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs cache-setup build-nix-image load-nix-image
+.PHONY: cluster-up cluster-down dev-up dev-down argo-list argo-logs cache-setup build-nix-image load-nix-image check-containerd preflight
+
+preflight: ## Run pre-flight checks before cluster setup
+	@./scripts/preflight-checks.sh
+
+check-containerd: ## Check if containerd version meets requirements (>2.0.0)
+	@./scripts/check-containerd-version.sh
 
 cluster-up:
 	@echo "Creating host directories for persistent volumes..."
@@ -6,6 +12,8 @@ cluster-up:
 	@chmod 777 /tmp/argo-nix-store /tmp/argo-uv-cache /tmp/argo-task-results
 	@echo "Creating Kind cluster..."
 	kind create cluster --name argo-dev --config infrastructure/k8s/kind-config.yaml
+	@echo "Verifying containerd version..."
+	@./scripts/check-containerd-version.sh || (echo ""; echo "⚠️  Warning: containerd version check failed. nix-portable may not work correctly."; echo "Consider upgrading kind and recreating the cluster.")
 	kubectl create namespace argo || true
 	kubectl apply -n argo -f https://github.com/argoproj/argo-workflows/releases/download/v3.5.0/quick-start-minimal.yaml
 	kubectl apply -f infrastructure/k8s/rbac.yaml

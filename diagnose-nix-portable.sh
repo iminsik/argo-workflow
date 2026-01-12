@@ -49,6 +49,28 @@ echo "7. Container Runtime Info:"
 docker info 2>/dev/null | grep -E "Runtime|Default Runtime" || echo "Runtime info not available"
 echo ""
 
+echo "7a. Containerd Version Check (in Kind cluster):"
+if kind get clusters 2>/dev/null | grep -q .; then
+    CLUSTER=$(kind get clusters | head -1)
+    CONTAINERD_VERSION=$(kubectl get nodes -o jsonpath='{.items[0].status.nodeInfo.containerRuntimeVersion}' 2>/dev/null || echo "N/A")
+    echo "Cluster: $CLUSTER"
+    echo "Containerd version: $CONTAINERD_VERSION"
+    if echo "$CONTAINERD_VERSION" | grep -q "containerd://"; then
+        VERSION_NUM=$(echo "$CONTAINERD_VERSION" | sed 's/containerd:\/\///')
+        # Simple version comparison (check if major version >= 2)
+        MAJOR_VERSION=$(echo "$VERSION_NUM" | cut -d. -f1)
+        if [ "$MAJOR_VERSION" -ge 2 ] 2>/dev/null; then
+            echo "✅ Containerd version $VERSION_NUM meets requirement (>=2.0.0)"
+        else
+            echo "⚠️  Containerd version $VERSION_NUM may be too old (requires >=2.0.0)"
+            echo "   Consider upgrading kind and recreating the cluster"
+        fi
+    fi
+else
+    echo "No kind clusters found"
+fi
+echo ""
+
 echo "8. File System Type (for Docker volumes):"
 df -T / 2>/dev/null || df -h / | head -1
 echo ""
