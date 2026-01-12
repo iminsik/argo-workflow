@@ -19,6 +19,8 @@ def build_step_script_source(
     python_code: str,
     dependencies: Optional[str] = None,
     requirements_file: Optional[str] = None,
+    system_dependencies: Optional[str] = None,
+    use_cache: bool = True,
     flow_definition: Optional[Dict] = None
 ) -> str:
     """
@@ -28,25 +30,70 @@ def build_step_script_source(
     Args:
         step_id: Unique identifier for this step
         python_code: Python code to execute
-        dependencies: Optional dependencies string
+        dependencies: Optional Python dependencies string
         requirements_file: Optional requirements file content
+        system_dependencies: Optional system dependencies (Nix packages)
+        use_cache: Whether to use cache volumes
         flow_definition: Full flow definition for context (optional)
     """
     script_parts = [
         "set -e",
         "",
+    ]
+    
+    # Install system dependencies using nix-portable (if provided)
+    if system_dependencies:
+        script_parts.extend([
+            "# Install system dependencies using nix-portable",
+            "if ! command -v nix-portable &> /dev/null; then",
+            "  echo 'Error: nix-portable not found in image. Using nix-portable base image required.'",
+            "  exit 1",
+            "fi",
+            "",
+            "echo 'Installing system dependencies: $SYSTEM_DEPS'",
+            "# Convert comma-separated to space-separated",
+            'SYSTEM_DEPS=$(echo "$SYSTEM_DEPS" | tr "," " ")',
+            "",
+            "# Install each system dependency",
+            "for dep in $SYSTEM_DEPS; do",
+            "  echo \"Installing system package: $dep\"",
+            "  nix-portable nix-env -iA nixpkgs.$dep 2>/dev/null || nix-portable nix-env -i $dep || {",
+            "    echo \"Warning: Failed to install $dep, continuing...\"",
+            "  }",
+            "done",
+            "",
+            "echo 'System dependencies installed successfully'",
+            "",
+        ])
+    
+    # Install uv if not present
+    script_parts.extend([
         "# Install uv if not present",
         "if ! command -v uv &> /dev/null; then",
         "  pip install --no-cache-dir uv",
         "fi",
         "",
+    ])
+    
+    # Set UV cache directory if cache is enabled
+    if use_cache:
+        script_parts.extend([
+            "# Use shared UV cache",
+            "export UV_CACHE_DIR=/root/.cache/uv",
+            "mkdir -p $UV_CACHE_DIR",
+            "echo 'Using UV cache at: $UV_CACHE_DIR'",
+            "",
+        ])
+    
+    # Create isolated virtual environment
+    script_parts.extend([
         "# Create isolated virtual environment",
         f'VENV_DIR="/tmp/venv-{step_id}-{{{{workflow.name}}}}"',
         'uv venv "$VENV_DIR"',
         "",
         "# Activate virtual environment",
         'source "$VENV_DIR/bin/activate"',
-    ]
+    ])
     
     # Handle requirements file
     if requirements_file:
@@ -211,18 +258,51 @@ def create_flow_workflow_with_hera(
                     detail="Flow contains cycles. DAG must be acyclic."
                 )
     
-    # Create workflow with Hera
+    # Create workflow with Hera (volumes will be set later)
     workflow = Workflow(
         generate_name="flow-",
         entrypoint="dag",
         namespace=namespace,
-        volumes=[
-            Volume(
-                name="task-results",
-                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
-            )
-        ]
+        volumes=[]  # Will be set below
     )
+    
+    # Check if cache volumes should be used (default: True)
+    use_cache = True  # Can be made configurable later
+    
+    # Build volumes list
+    volumes = [
+        Volume(
+            name="task-results",
+            persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
+        )
+    ]
+    
+    # Add cache volumes if enabled
+    if use_cache:
+        volumes.extend([
+            Volume(
+                name="uv-cache",
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="uv-cache-pvc")
+            ),
+            Volume(
+                name="nix-store",
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="nix-store-pvc")
+            )
+        ])
+    
+    # Build volume mounts
+    volume_mounts = [
+        VolumeMount(name="task-results", mount_path="/mnt/results")
+    ]
+    
+    if use_cache:
+        volume_mounts.extend([
+            VolumeMount(name="uv-cache", mount_path="/root/.cache/uv"),
+            VolumeMount(name="nix-store", mount_path="/nix/store")
+        ])
+    
+    # Update workflow volumes
+    workflow.volumes = volumes
     
     # Create task templates for each step
     step_templates = {}
@@ -232,6 +312,12 @@ def create_flow_workflow_with_hera(
         python_code = step.get("pythonCode", "")
         dependencies = step.get("dependencies")
         requirements_file = step.get("requirementsFile")
+        system_dependencies = step.get("systemDependencies")
+        
+        # Determine base image
+        base_image = "python:3.11-slim"
+        if system_dependencies:
+            base_image = os.getenv("NIX_PORTABLE_BASE_IMAGE", "python:3.11-slim")
         
         # Build environment variables
         env_vars = [
@@ -240,7 +326,10 @@ def create_flow_workflow_with_hera(
             EnvVar(name="STEP_NAME", value=step_name),
         ]
         
-        has_dependencies = bool(dependencies or requirements_file)
+        if system_dependencies:
+            env_vars.append(EnvVar(name="SYSTEM_DEPS", value=system_dependencies))
+        
+        has_dependencies = bool(dependencies or requirements_file or system_dependencies)
         
         if has_dependencies:
             dependencies_value = "requirements.txt" if requirements_file else (dependencies or "")
@@ -251,18 +340,18 @@ def create_flow_workflow_with_hera(
                 python_code=python_code,
                 dependencies=dependencies,
                 requirements_file=requirements_file,
+                system_dependencies=system_dependencies,
+                use_cache=use_cache,
                 flow_definition=flow_definition
             )
             
             script_template = Script(
                 name=step_id,
-                image="python:3.11-slim",
+                image=base_image,
                 command=["bash"],
                 source=script_source,
                 env=env_vars,
-                volume_mounts=[
-                    VolumeMount(name="task-results", mount_path="/mnt/results")
-                ]
+                volume_mounts=volume_mounts
             )
             
             workflow.templates.append(script_template)
@@ -275,18 +364,18 @@ def create_flow_workflow_with_hera(
                 python_code=python_code,
                 dependencies=None,
                 requirements_file=None,
+                system_dependencies=system_dependencies,
+                use_cache=use_cache,
                 flow_definition=flow_definition
             )
             
             script_template = Script(
                 name=step_id,
-                image="python:3.11-slim",
+                image=base_image,
                 command=["bash"],
                 source=script_source,
                 env=env_vars,
-                volume_mounts=[
-                    VolumeMount(name="task-results", mount_path="/mnt/results")
-                ]
+                volume_mounts=volume_mounts
             )
             
             workflow.templates.append(script_template)

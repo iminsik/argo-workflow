@@ -13,6 +13,7 @@
     pythonCode: string;
     dependencies?: string;
     requirementsFile?: string;
+    systemDependencies?: string;
     startedAt: string;
     finishedAt: string;
     createdAt: string;
@@ -24,6 +25,7 @@
       phase: string;
       pythonCode: string;
       dependencies?: string;
+      systemDependencies?: string;
       message?: string;
     };
     activeTab: 'code' | 'logs';
@@ -38,7 +40,7 @@
     onClose: () => void;
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
-    onRerun: (task: { pythonCode: string; dependencies?: string }, taskId: string) => void;
+    onRerun: (task: { pythonCode: string; dependencies?: string; systemDependencies?: string }, taskId: string) => void;
     onRun?: (taskId: string) => void;
     onLoadRunLogs?: (taskId: string, runNumber: number) => Promise<void>;
   }
@@ -58,6 +60,7 @@
   const selectedRun = $derived(runs.find(r => r.runNumber === selectedRunNumber));
   const displayCode = $derived(selectedRun?.pythonCode || task.pythonCode);
   const displayDependencies = $derived(selectedRun?.dependencies || task.dependencies);
+  const displaySystemDependencies = $derived(selectedRun?.systemDependencies || task.systemDependencies);
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -136,7 +139,12 @@
       {/if}
       {#if displayDependencies}
         <Badge variant="outline" class="max-w-md">
-          📦 Dependencies: {displayDependencies}
+          📦 Python: {displayDependencies}
+        </Badge>
+      {/if}
+      {#if displaySystemDependencies}
+        <Badge variant="outline" class="max-w-md">
+          🔧 System: {displaySystemDependencies}
         </Badge>
       {/if}
     </div>
@@ -150,7 +158,11 @@
         </Button>
       {/if}
       <Button
-        onclick={() => onRerun({ pythonCode: displayCode, dependencies: displayDependencies }, task.id)}
+        onclick={() => onRerun({ 
+          pythonCode: displayCode, 
+          dependencies: displayDependencies,
+          systemDependencies: displaySystemDependencies
+        }, task.id)}
         variant="default"
       >
         <Play size={16} class="mr-2" /> Edit & Rerun
@@ -230,9 +242,20 @@
           <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
             <div class="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1 flex items-center gap-2">
               <span>📦</span>
-              <span>Dependencies</span>
+              <span>Python Dependencies</span>
             </div>
             <div class="text-sm text-blue-800 dark:text-blue-200 font-mono break-words">{displayDependencies}</div>
+          </div>
+        {/if}
+        {#if displaySystemDependencies}
+          <div class="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded">
+            <div class="text-sm font-semibold text-green-900 dark:text-green-100 mb-1 flex items-center gap-2">
+              <span>🔧</span>
+              <span>System Dependencies</span>
+            </div>
+            <div class="text-sm text-green-800 dark:text-green-200 font-mono break-words">
+              {displaySystemDependencies}
+            </div>
           </div>
         {/if}
         <div class="flex-1 min-h-0 overflow-hidden">

@@ -19,12 +19,20 @@ from fastapi import HTTPException
 
 def build_script_source(
     dependencies: Optional[str] = None,
-    requirements_file: Optional[str] = None
+    requirements_file: Optional[str] = None,
+    system_dependencies: Optional[str] = None,
+    use_cache: bool = True
 ) -> str:
     """
     Build the bash script source for executing Python code with optional dependencies.
     
     This replaces the complex YAML template manipulation and requirements file injection.
+    
+    Args:
+        dependencies: Python package names (space or comma-separated)
+        requirements_file: requirements.txt content
+        system_dependencies: Nix package names (space or comma-separated, e.g., "gcc make")
+        use_cache: Whether to use UV and Nix caches (default: True)
     
     Note: The Python code is passed via the PYTHON_CODE environment variable,
     which is set separately when creating the workflow template.
@@ -32,18 +40,71 @@ def build_script_source(
     script_parts = [
         "set -e",
         "",
+    ]
+    
+    # Install system dependencies using nix-portable (if provided)
+    if system_dependencies:
+        script_parts.extend([
+            "# Install system dependencies using nix-portable",
+            "if ! command -v nix-portable &> /dev/null; then",
+            "  echo 'Error: nix-portable not found in image. Using nix-portable base image required.'",
+            "  exit 1",
+            "fi",
+            "",
+            "echo 'Installing system dependencies: $SYSTEM_DEPS'",
+            "# Convert comma-separated to space-separated",
+            'SYSTEM_DEPS=$(echo "$SYSTEM_DEPS" | tr "," " ")',
+            "",
+            "# Install each system dependency",
+            "for dep in $SYSTEM_DEPS; do",
+            "  echo \"Installing system package: $dep\"",
+            "  # Try nixpkgs attribute first, fallback to package name",
+            "  if nix-portable nix-env -iA nixpkgs.$dep 2>&1; then",
+            "    echo \"Successfully installed $dep via nixpkgs attribute\"",
+            "  elif nix-portable nix-env -i $dep 2>&1; then",
+            "    echo \"Successfully installed $dep via package name\"",
+            "  else",
+            "    echo \"Warning: Failed to install $dep, continuing...\"",
+            "  fi",
+            "  # Verify installation by checking if command exists",
+            "  if command -v $dep &> /dev/null; then",
+            "    echo \"Verifying $dep installation:\"",
+            "    $dep --version 2>&1 || echo \"$dep is installed but --version failed\"",
+            "  fi",
+            "done",
+            "",
+            "echo 'System dependencies installed successfully'",
+            "",
+        ])
+    
+    # Install uv if not present
+    script_parts.extend([
         "# Install uv if not present",
         "if ! command -v uv &> /dev/null; then",
         "  pip install --no-cache-dir uv",
         "fi",
         "",
+    ])
+    
+    # Set UV cache directory if cache is enabled
+    if use_cache:
+        script_parts.extend([
+            "# Use shared UV cache",
+            "export UV_CACHE_DIR=/root/.cache/uv",
+            "mkdir -p $UV_CACHE_DIR",
+            "echo 'Using UV cache at: $UV_CACHE_DIR'",
+            "",
+        ])
+    
+    # Create isolated virtual environment
+    script_parts.extend([
         "# Create isolated virtual environment",
         'VENV_DIR="/tmp/venv-{{workflow.name}}"',
         'uv venv "$VENV_DIR"',
         "",
         "# Activate virtual environment",
         'source "$VENV_DIR/bin/activate"',
-    ]
+    ])
     
     # Handle requirements file
     if requirements_file:
@@ -62,10 +123,10 @@ def build_script_source(
     elif dependencies:
         script_parts.extend([
             "",
-            "# Install dependencies",
-            "echo 'Installing packages: $DEPENDENCIES'",
-            'echo "$DEPENDENCIES" | tr \',\' \' \' | xargs uv pip install',
-            "echo 'Dependencies installed successfully'",
+            "# Install Python dependencies",
+            "echo 'Installing Python packages: $PYTHON_DEPS'",
+            'echo "$PYTHON_DEPS" | tr \',\' \' \' | xargs uv pip install',
+            "echo 'Python dependencies installed successfully'",
         ])
     
     # Execute Python code
@@ -83,18 +144,22 @@ def create_workflow_with_hera(
     python_code: str,
     dependencies: Optional[str] = None,
     requirements_file: Optional[str] = None,
+    system_dependencies: Optional[str] = None,
+    use_cache: bool = True,
     namespace: str = "argo"
 ) -> str:
     """
-    Create an Argo Workflow using Hera SDK.
+    Create an Argo Workflow using Hera SDK with hybrid UV/Nix support.
     
     This replaces ~270 lines of complex YAML template manipulation with clean,
     type-safe Python code.
     
     Args:
         python_code: Python code to execute
-        dependencies: Space or comma-separated package names (optional)
+        dependencies: Space or comma-separated Python package names (optional)
         requirements_file: requirements.txt content (optional)
+        system_dependencies: Space or comma-separated Nix package names (optional, e.g., "gcc make")
+        use_cache: Whether to mount cache volumes (default: True)
         namespace: Kubernetes namespace for the workflow
         
     Returns:
@@ -103,43 +168,75 @@ def create_workflow_with_hera(
     Raises:
         HTTPException: If workflow creation fails
     """
-    # Validate PVC exists (same validation as current code)
+    # Validate PVCs exist
     core_api = CoreV1Api()
-    try:
-        pvc = core_api.read_namespaced_persistent_volume_claim(
-            name="task-results-pvc",
-            namespace=namespace
-        )
-        pvc_status = pvc.status.phase if pvc.status else "Unknown"
-        if pvc_status != "Bound":
-            raise HTTPException(
-                status_code=400,
-                detail=f"PVC 'task-results-pvc' is not bound. Current status: {pvc_status}."
+    required_pvcs = ["task-results-pvc"]
+    if use_cache:
+        required_pvcs.extend(["uv-cache-pvc", "nix-store-pvc"])
+    
+    for pvc_name in required_pvcs:
+        try:
+            pvc = core_api.read_namespaced_persistent_volume_claim(
+                name=pvc_name,
+                namespace=namespace
             )
-    except Exception as pvc_error:
-        if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
-            raise HTTPException(
-                status_code=400,
-                detail="PVC 'task-results-pvc' not found. Please create it first."
-            )
-        if isinstance(pvc_error, HTTPException):
-            raise pvc_error
-        print(f"Warning: Could not verify PVC status: {pvc_error}")
+            pvc_status = pvc.status.phase if pvc.status else "Unknown"
+            if pvc_status != "Bound":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PVC '{pvc_name}' is not bound. Current status: {pvc_status}."
+                )
+        except Exception as pvc_error:
+            if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PVC '{pvc_name}' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pvc-cache-volumes.yaml"
+                )
+            if isinstance(pvc_error, HTTPException):
+                raise pvc_error
+            print(f"Warning: Could not verify PVC '{pvc_name}' status: {pvc_error}")
     
     # Determine if we need dependencies handling
-    has_dependencies = bool(dependencies or requirements_file)
+    has_dependencies = bool(dependencies or requirements_file or system_dependencies)
+    
+    # Build volumes list
+    volumes = [
+        Volume(
+            name="task-results",
+            persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
+        )
+    ]
+    
+    # Add cache volumes if enabled
+    if use_cache:
+        volumes.extend([
+            Volume(
+                name="uv-cache",
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="uv-cache-pvc")
+            ),
+            Volume(
+                name="nix-store",
+                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="nix-store-pvc")
+            )
+        ])
+    
+    # Build volume mounts
+    volume_mounts = [
+        VolumeMount(name="task-results", mount_path="/mnt/results")
+    ]
+    
+    if use_cache:
+        volume_mounts.extend([
+            VolumeMount(name="uv-cache", mount_path="/root/.cache/uv"),
+            VolumeMount(name="nix-store", mount_path="/nix/store")
+        ])
     
     # Create workflow with Hera
     workflow = Workflow(
         generate_name="python-job-",
         entrypoint="main",
         namespace=namespace,
-        volumes=[
-            Volume(
-                name="task-results",
-                persistent_volume_claim=PersistentVolumeClaimVolumeSource(claim_name="task-results-pvc")
-            )
-        ]
+        volumes=volumes
     )
     
     # Build environment variables
@@ -148,25 +245,36 @@ def create_workflow_with_hera(
         EnvVar(name="PYTHON_CODE", value=python_code),
     ]
     
+    # Determine base image
+    # Use nix-portable base if system dependencies are needed, otherwise use standard Python image
+    if system_dependencies:
+        base_image = os.getenv("NIX_PORTABLE_BASE_IMAGE", "python:3.11-slim")
+        # Note: In production, use your built image: "your-registry/nix-portable-base:latest"
+        env_vars.append(EnvVar(name="SYSTEM_DEPS", value=system_dependencies))
+    else:
+        base_image = "python:3.11-slim"
+    
     if has_dependencies:
         # Use script template for dependency management
-        dependencies_value = "requirements.txt" if requirements_file else (dependencies or "")
-        env_vars.append(EnvVar(name="DEPENDENCIES", value=dependencies_value))
+        if dependencies:
+            env_vars.append(EnvVar(name="PYTHON_DEPS", value=dependencies))
+        elif requirements_file:
+            env_vars.append(EnvVar(name="DEPENDENCIES", value="requirements.txt"))
         
         script_source = build_script_source(
             dependencies=dependencies,
-            requirements_file=requirements_file
+            requirements_file=requirements_file,
+            system_dependencies=system_dependencies,
+            use_cache=use_cache
         )
         
         script_template = Script(
             name="main",
-            image="python:3.11-slim",
+            image=base_image,
             command=["bash"],
             source=script_source,
             env=env_vars,
-            volume_mounts=[
-                VolumeMount(name="task-results", mount_path="/mnt/results")
-            ]
+            volume_mounts=volume_mounts
         )
         
         workflow.templates.append(script_template)
@@ -174,13 +282,11 @@ def create_workflow_with_hera(
         # Use container template for simple execution (no dependencies)
         container_template = Container(
             name="main",
-            image="python:3.11-slim",
+            image=base_image,
             command=["python", "-c"],
             args=[python_code],
             env=env_vars,
-            volume_mounts=[
-                VolumeMount(name="task-results", mount_path="/mnt/results")
-            ]
+            volume_mounts=volume_mounts
         )
         
         workflow.templates.append(container_template)

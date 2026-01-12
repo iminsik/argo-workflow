@@ -1,0 +1,23 @@
+# Dockerfile for base image with nix-portable and uv
+# This image provides both nix-portable (for system dependencies) and uv (for Python packages)
+
+FROM python:3.11-slim
+
+# Install nix-portable
+# Download the latest release from GitHub
+RUN curl -L https://github.com/DavHau/nix-portable/releases/download/v0.5.0/nix-portable \
+    -o /usr/local/bin/nix-portable && \
+    chmod +x /usr/local/bin/nix-portable
+
+# Install uv (for Python package management)
+RUN pip install --no-cache-dir uv
+
+# Set environment variables for nix-portable
+ENV NIX_PORTABLE=1
+ENV PATH="/root/.nix-profile/bin:${PATH}"
+
+# Verify installations
+RUN nix-portable --version && uv --version
+
+# Default command
+CMD ["python"]

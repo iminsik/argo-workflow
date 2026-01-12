@@ -80,6 +80,7 @@
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
   let requirementsFile = $state('');
+  let systemDependencies = $state('');
   let showDependencies = $state(false);
   let submitting = $state(false);
   let rerunTaskId = $state<string | null>(null);  // Track which task is being rerun
@@ -90,6 +91,7 @@
       pythonCode = defaultPythonCode;
       dependencies = '';
       requirementsFile = '';
+      systemDependencies = '';
       showDependencies = false;
       rerunTaskId = null;
     }
@@ -523,6 +525,9 @@
       if (requirementsFile.trim()) {
         requestBody.requirementsFile = requirementsFile.trim();
       }
+      if (systemDependencies.trim()) {
+        requestBody.systemDependencies = systemDependencies.trim();
+      }
       if (rerunTaskId) {
         requestBody.taskId = rerunTaskId;  // Include taskId for rerun
       }
@@ -559,8 +564,31 @@
 
   async function executeTask(taskId: string) {
     try {
+      // Get task details to extract systemDependencies if available
+      let systemDeps: string | null = null;
+      try {
+        const taskRes = await fetch(`${apiUrl}/api/v1/tasks/${taskId}`);
+        if (taskRes.ok) {
+          const taskData = await taskRes.json();
+          systemDeps = taskData.systemDependencies || null;
+        }
+      } catch (e) {
+        // If we can't get task details, continue without systemDependencies
+        console.warn('Could not fetch task details for systemDependencies:', e);
+      }
+      
+      // Build request body with systemDependencies if available
+      const requestBody: any = { useCache: true };
+      if (systemDeps) {
+        requestBody.systemDependencies = systemDeps;
+      }
+      
       const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/run`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
       });
       
       if (!res.ok) {
@@ -960,8 +988,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         rerunTaskId = taskId;
         pythonCode = taskData.pythonCode || defaultPythonCode;
         dependencies = taskData.dependencies || '';
+        systemDependencies = (taskData as any).systemDependencies || '';
         requirementsFile = ''; // Clear requirements file, user can add it if needed
-        showDependencies = !!taskData.dependencies; // Show dependencies section if there are any
+        showDependencies = !!(taskData.dependencies || (taskData as any).systemDependencies); // Show dependencies section if there are any
         showSubmitModal = true;
       }}
       onLoadRunLogs={async (taskId: string, runNumber: number) => {
@@ -1052,6 +1081,23 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
           ></textarea>
           <p class="text-xs text-muted-foreground mt-1">
             Enter requirements.txt format. If provided, this takes precedence over package dependencies.
+          </p>
+        </div>
+        
+        <div class="mb-2">
+          <label for="system-dependencies-input" class="block text-sm font-medium mb-2">
+            System Dependencies (Nix packages, space or comma-separated)
+          </label>
+          <input
+            id="system-dependencies-input"
+            type="text"
+            bind:value={systemDependencies}
+            placeholder="e.g., gcc make cmake"
+            class="w-full px-3 py-2 border rounded bg-background"
+            disabled={submitting}
+          />
+          <p class="text-xs text-muted-foreground mt-1">
+            System-level packages installed via Nix Portable (e.g., gcc, make, cmake, pkg-config)
           </p>
         </div>
       </div>
