@@ -32,7 +32,7 @@ metadata:
 spec:
   storageClassName: manual
   capacity:
-    storage: 20Gi
+    storage: 50Gi  # Increased from 20Gi to 50Gi for more package storage
   accessModes:
     - ReadWriteMany
   hostPath:
