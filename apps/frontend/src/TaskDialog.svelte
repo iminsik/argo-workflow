@@ -41,7 +41,7 @@
     onClose: () => void;
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
-    onRerun: (task: { pythonCode: string; dependencies?: string; systemDependencies?: string }, taskId: string) => void;
+    onRerun: (task: { pythonCode: string; dependencies?: string; systemDependencies?: string; requirementsFile?: string }, taskId: string) => void;
     onRun?: (taskId: string) => void;
     onLoadRunLogs?: (taskId: string, runNumber: number) => Promise<void>;
   }
@@ -62,6 +62,7 @@
   const displayCode = $derived(selectedRun?.pythonCode || task.pythonCode);
   const displayDependencies = $derived(selectedRun?.dependencies || task.dependencies);
   const displaySystemDependencies = $derived(selectedRun?.systemDependencies || task.systemDependencies);
+  const displayRequirementsFile = $derived(selectedRun?.requirementsFile || task.requirementsFile);
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -162,7 +163,8 @@
         onclick={() => onRerun({ 
           pythonCode: displayCode, 
           dependencies: displayDependencies,
-          systemDependencies: displaySystemDependencies
+          systemDependencies: displaySystemDependencies || "",  // Use selected run's systemDependencies, or task's if no run selected
+          requirementsFile: displayRequirementsFile || ""  // Use selected run's requirementsFile, or task's if no run selected
         }, task.id)}
         variant="default"
       >

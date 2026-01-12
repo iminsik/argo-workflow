@@ -151,7 +151,7 @@
     return false;
   }
 
-  async function fetchTasks(isInitial = false) {
+  async function fetchTasks(isInitial = false, forceUpdate = false) {
     try {
       if (isInitial) {
         initialLoading = true;
@@ -160,7 +160,9 @@
       const data = await res.json();
       const newTasks = data.tasks || [];
       
-      if (tasksChanged(tasks, newTasks)) {
+      // Always update if forceUpdate is true (e.g., after saving changes)
+      // Otherwise only update if tasksChanged() detects changes
+      if (forceUpdate || tasksChanged(tasks, newTasks)) {
         tasks = newTasks;
       }
     } catch (error) {
@@ -546,14 +548,27 @@
       }
       
       const data = await res.json();
-      if (rerunTaskId) {
-        alert(`Task ${data.id} saved. Click 'Run' to execute it.`);
+      const savedTaskId = data.id || rerunTaskId;
+      
+      // Force update to ensure systemDependencies and other changes are reflected
+      await fetchTasks(false, true);
+      
+      // If this is a rerun, automatically execute the task after saving
+      if (rerunTaskId && savedTaskId) {
+        showSubmitModal = false;
+        // Small delay to ensure UI updates before executing
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // Automatically run the task
+        await executeTask(savedTaskId);
       } else {
-        alert('Task saved: ' + data.id + '. Click "Run" button to execute it.');
+        if (rerunTaskId) {
+          alert(`Task ${savedTaskId} saved. Click 'Run' to execute it.`);
+        } else {
+          alert('Task saved: ' + savedTaskId + '. Click "Run" button to execute it.');
+        }
+        showSubmitModal = false;
       }
-      showSubmitModal = false;
       // pythonCode will be reset by the $effect when showSubmitModal becomes false
-      fetchTasks();
     } catch (error) {
       console.error('Failed to save task:', error);
       alert('Failed to save task: ' + (error instanceof Error ? error.message : 'Unknown error'));
@@ -989,8 +1004,8 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         pythonCode = taskData.pythonCode || defaultPythonCode;
         dependencies = taskData.dependencies || '';
         systemDependencies = (taskData as any).systemDependencies || '';
-        requirementsFile = ''; // Clear requirements file, user can add it if needed
-        showDependencies = !!(taskData.dependencies || (taskData as any).systemDependencies); // Show dependencies section if there are any
+        requirementsFile = (taskData as any).requirementsFile || ''; // Use selected run's requirementsFile, or empty if not available
+        showDependencies = !!(taskData.dependencies || (taskData as any).systemDependencies || (taskData as any).requirementsFile); // Show dependencies section if there are any
         showSubmitModal = true;
       }}
       onLoadRunLogs={async (taskId: string, runNumber: number) => {
@@ -1120,7 +1135,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         disabled={submitting || !pythonCode.trim()}
         variant="default"
       >
-        {submitting ? 'Saving...' : 'Save Task'}
+        {submitting 
+          ? (rerunTaskId ? 'Saving & Running...' : 'Saving...') 
+          : (rerunTaskId ? 'Save & Run' : 'Save Task')}
         {#if !submitting}
           <Play size={18} class="ml-2" />
         {/if}

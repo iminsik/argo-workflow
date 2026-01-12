@@ -1056,18 +1056,18 @@ async def run_task(task_id: str, run_request: TaskRunRequest | None = None):
                         detail=f"Task {task_id} already has a running workflow (run #{latest_run.run_number if has_python_code else (latest_run[3] if isinstance(latest_run, tuple) else latest_run.run_number)}). Please wait for it to complete or cancel it first."
                     )
             
-            # Get system dependencies - priority: request > latest run > task > None
+            # Get system dependencies - priority: request > task > latest run > None
+            # Task takes priority over latest run because it's the source of truth (updated via "Edit & Rerun")
             system_deps = None
             if run_request and run_request.systemDependencies:
-                # Use system dependencies from request
+                # Use system dependencies from request (explicitly provided)
                 system_deps = run_request.systemDependencies
+            elif task.system_dependencies:
+                # Use task's system dependencies (updated via "Edit & Rerun")
+                system_deps = task.system_dependencies
             elif has_python_code and latest_run:
-                # Try to get from latest run (if it was stored there from a previous run)
+                # Fallback to latest run's system dependencies (for backward compatibility)
                 system_deps = getattr(latest_run, 'system_dependencies', None)
-            
-            # If still None, try to get from task
-            if system_deps is None:
-                system_deps = getattr(task, 'system_dependencies', None)
             
             # Get use_cache setting
             use_cache = run_request.useCache if run_request else True
@@ -1421,15 +1421,16 @@ async def get_task(task_id: str):
         db.close()
         
         # Return task info with latest run's code (for backward compatibility)
+        # BUT use task's systemDependencies (not run's) because task is the source of truth updated via "Edit & Rerun"
         latest_run = runs[0] if runs else None
         if latest_run and has_python_code:
-            # New schema: use latest run's code
+            # New schema: use latest run's code, but task's systemDependencies
             return {
                 "id": task.id,
                 "pythonCode": latest_run.python_code,
                 "dependencies": latest_run.dependencies or "",
                 "requirementsFile": latest_run.requirements_file or "",
-                "systemDependencies": getattr(latest_run, 'system_dependencies', None) or "",
+                "systemDependencies": getattr(task, 'system_dependencies', None) or "",  # Use task's, not run's
                 "createdAt": task.created_at.isoformat(),
                 "updatedAt": task.updated_at.isoformat(),
                 "runs": run_list
