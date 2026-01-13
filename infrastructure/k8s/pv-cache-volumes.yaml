@@ -1,0 +1,40 @@
+# PersistentVolumes for cache volumes (UV cache and Nix store)
+# For local development with Kind
+# Note: For production (AWS EKS, etc.), use dynamic provisioning with StorageClass
+
+---
+# UV Cache PV for Python packages
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: uv-cache-pv
+  labels:
+    type: local
+    purpose: uv-cache
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: /tmp/argo-uv-cache
+  persistentVolumeReclaimPolicy: Retain
+---
+# Nix Store PV for system packages
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nix-store-pv
+  labels:
+    type: local
+    purpose: nix-store
+spec:
+  storageClassName: manual
+  capacity:
+    storage: 50Gi  # Increased from 20Gi to 50Gi for more package storage
+  accessModes:
+    - ReadWriteMany
+  hostPath:
+    path: /tmp/argo-nix-store
+  persistentVolumeReclaimPolicy: Retain

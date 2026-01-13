@@ -37,7 +37,7 @@
   let tasks = $state<Task[]>([]);
   let initialLoading = $state(true);
   let selectedTaskId = $state<string | null>(null);
-  let activeTab = $state<'code' | 'logs'>('code');
+  let activeTab = $state<'code' | 'logs' | 'template'>('code');
   
   // Track previous values to detect actual changes
   let prevSelectedTaskId: string | null = null;
@@ -80,6 +80,7 @@
   let pythonCode = $state(defaultPythonCode);
   let dependencies = $state('');
   let requirementsFile = $state('');
+  let systemDependencies = $state('');
   let showDependencies = $state(false);
   let submitting = $state(false);
   let rerunTaskId = $state<string | null>(null);  // Track which task is being rerun
@@ -90,6 +91,7 @@
       pythonCode = defaultPythonCode;
       dependencies = '';
       requirementsFile = '';
+      systemDependencies = '';
       showDependencies = false;
       rerunTaskId = null;
     }
@@ -149,7 +151,7 @@
     return false;
   }
 
-  async function fetchTasks(isInitial = false) {
+  async function fetchTasks(isInitial = false, forceUpdate = false) {
     try {
       if (isInitial) {
         initialLoading = true;
@@ -158,7 +160,9 @@
       const data = await res.json();
       const newTasks = data.tasks || [];
       
-      if (tasksChanged(tasks, newTasks)) {
+      // Always update if forceUpdate is true (e.g., after saving changes)
+      // Otherwise only update if tasksChanged() detects changes
+      if (forceUpdate || tasksChanged(tasks, newTasks)) {
         tasks = newTasks;
       }
     } catch (error) {
@@ -523,6 +527,9 @@
       if (requirementsFile.trim()) {
         requestBody.requirementsFile = requirementsFile.trim();
       }
+      if (systemDependencies.trim()) {
+        requestBody.systemDependencies = systemDependencies.trim();
+      }
       if (rerunTaskId) {
         requestBody.taskId = rerunTaskId;  // Include taskId for rerun
       }
@@ -541,14 +548,27 @@
       }
       
       const data = await res.json();
-      if (rerunTaskId) {
-        alert(`Task ${data.id} saved. Click 'Run' to execute it.`);
+      const savedTaskId = data.id || rerunTaskId;
+      
+      // Force update to ensure systemDependencies and other changes are reflected
+      await fetchTasks(false, true);
+      
+      // If this is a rerun, automatically execute the task after saving
+      if (rerunTaskId && savedTaskId) {
+        showSubmitModal = false;
+        // Small delay to ensure UI updates before executing
+        await new Promise(resolve => setTimeout(resolve, 100));
+        // Automatically run the task
+        await executeTask(savedTaskId);
       } else {
-        alert('Task saved: ' + data.id + '. Click "Run" button to execute it.');
+        if (rerunTaskId) {
+          alert(`Task ${savedTaskId} saved. Click 'Run' to execute it.`);
+        } else {
+          alert('Task saved: ' + savedTaskId + '. Click "Run" button to execute it.');
+        }
+        showSubmitModal = false;
       }
-      showSubmitModal = false;
       // pythonCode will be reset by the $effect when showSubmitModal becomes false
-      fetchTasks();
     } catch (error) {
       console.error('Failed to save task:', error);
       alert('Failed to save task: ' + (error instanceof Error ? error.message : 'Unknown error'));
@@ -559,8 +579,31 @@
 
   async function executeTask(taskId: string) {
     try {
+      // Get task details to extract systemDependencies if available
+      let systemDeps: string | null = null;
+      try {
+        const taskRes = await fetch(`${apiUrl}/api/v1/tasks/${taskId}`);
+        if (taskRes.ok) {
+          const taskData = await taskRes.json();
+          systemDeps = taskData.systemDependencies || null;
+        }
+      } catch (e) {
+        // If we can't get task details, continue without systemDependencies
+        console.warn('Could not fetch task details for systemDependencies:', e);
+      }
+      
+      // Build request body with systemDependencies if available
+      const requestBody: any = { useCache: true };
+      if (systemDeps) {
+        requestBody.systemDependencies = systemDeps;
+      }
+      
       const res = await fetch(`${apiUrl}/api/v1/tasks/${taskId}/run`, {
         method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: Object.keys(requestBody).length > 0 ? JSON.stringify(requestBody) : undefined,
       });
       
       if (!res.ok) {
@@ -960,8 +1003,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         rerunTaskId = taskId;
         pythonCode = taskData.pythonCode || defaultPythonCode;
         dependencies = taskData.dependencies || '';
-        requirementsFile = ''; // Clear requirements file, user can add it if needed
-        showDependencies = !!taskData.dependencies; // Show dependencies section if there are any
+        systemDependencies = (taskData as any).systemDependencies || '';
+        requirementsFile = (taskData as any).requirementsFile || ''; // Use selected run's requirementsFile, or empty if not available
+        showDependencies = !!(taskData.dependencies || (taskData as any).systemDependencies || (taskData as any).requirementsFile); // Show dependencies section if there are any
         showSubmitModal = true;
       }}
       onLoadRunLogs={async (taskId: string, runNumber: number) => {
@@ -1054,6 +1098,23 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
             Enter requirements.txt format. If provided, this takes precedence over package dependencies.
           </p>
         </div>
+        
+        <div class="mb-2">
+          <label for="system-dependencies-input" class="block text-sm font-medium mb-2">
+            System Dependencies (Nix packages, space or comma-separated)
+          </label>
+          <input
+            id="system-dependencies-input"
+            type="text"
+            bind:value={systemDependencies}
+            placeholder="e.g., gcc make cmake"
+            class="w-full px-3 py-2 border rounded bg-background"
+            disabled={submitting}
+          />
+          <p class="text-xs text-muted-foreground mt-1">
+            System-level packages installed via Nix Portable (e.g., gcc, make, cmake, pkg-config)
+          </p>
+        </div>
       </div>
     {/if}
     
@@ -1074,7 +1135,9 @@ print(f"Successfully read {len(result_files)} result file(s)")`;
         disabled={submitting || !pythonCode.trim()}
         variant="default"
       >
-        {submitting ? 'Saving...' : 'Save Task'}
+        {submitting 
+          ? (rerunTaskId ? 'Saving & Running...' : 'Saving...') 
+          : (rerunTaskId ? 'Save & Run' : 'Save Task')}
         {#if !submitting}
           <Play size={18} class="ml-2" />
         {/if}

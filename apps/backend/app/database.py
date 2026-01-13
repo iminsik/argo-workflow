@@ -32,6 +32,7 @@ class Task(Base):
     python_code: Mapped[str] = mapped_column(Text, nullable=False)
     dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)  # Can be package list or "requirements.txt"
     requirements_file: Mapped[str | None] = mapped_column(Text, nullable=True)  # Requirements file content if used
+    system_dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)  # System dependencies (Nix packages)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
@@ -54,6 +55,7 @@ class TaskRun(Base):
     python_code: Mapped[str] = mapped_column(Text, nullable=False)  # Snapshot of code used for this run
     dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)  # Snapshot of dependencies used for this run
     requirements_file: Mapped[str | None] = mapped_column(Text, nullable=True)  # Snapshot of requirements file used for this run
+    system_dependencies: Mapped[str | None] = mapped_column(Text, nullable=True)  # Snapshot of system dependencies used for this run
     started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
@@ -169,6 +171,27 @@ class FlowStepLog(Base):
 def init_db():
     """Initialize database tables."""
     Base.metadata.create_all(bind=engine)
+    
+    # Migrate: Add system_dependencies column to task_runs and tasks if they don't exist
+    try:
+        from sqlalchemy import inspect as sql_inspect, text
+        inspector = sql_inspect(engine)
+        
+        # Add system_dependencies to task_runs if it doesn't exist
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        if 'system_dependencies' not in task_runs_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS system_dependencies TEXT"))
+            print("Added system_dependencies column to task_runs table")
+        
+        # Add system_dependencies to tasks if it doesn't exist
+        tasks_columns = [col['name'] for col in inspector.get_columns('tasks')]
+        if 'system_dependencies' not in tasks_columns:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS system_dependencies TEXT"))
+            print("Added system_dependencies column to tasks table")
+    except Exception as e:
+        print(f"Warning: Could not add system_dependencies column: {e}")
 
 
 def get_db() -> Generator[Session, None, None]:

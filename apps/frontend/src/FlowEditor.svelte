@@ -39,6 +39,7 @@
   let currentStepName = $state('');
   let currentStepId = $state('');
   let currentStepDependencies = $state('');
+  let currentStepSystemDependencies = $state('');
   let saving = $state(false);
   let running = $state(false);
   // Initialize state with default values to avoid capturing initial prop values
@@ -139,6 +140,7 @@
             label: step.name,
             pythonCode: step.pythonCode,
             dependencies: step.dependencies || '',
+            systemDependencies: step.systemDependencies || '',
           }
         }));
         
@@ -170,6 +172,7 @@
         label: `Step ${nodes.length + 1}`,
         pythonCode: "print('Hello from step')",
         dependencies: '',
+        systemDependencies: '',
       }
     };
     nodes = [...nodes, newNode];
@@ -185,6 +188,7 @@
       currentStepName = newNode.data.label;
       currentStepCode = newNode.data.pythonCode;
       currentStepDependencies = newNode.data.dependencies;
+      currentStepSystemDependencies = newNode.data.systemDependencies || '';
       showStepEditor = true;
     }, 50);
   }
@@ -219,6 +223,7 @@
     currentStepName = nodeData.label || nodeData.name || `Step ${node.id}`;
     currentStepCode = nodeData.pythonCode || "print('Hello from step')";
     currentStepDependencies = nodeData.dependencies || '';
+    currentStepSystemDependencies = nodeData.systemDependencies || '';
     
     // Open the editor panel
     showStepEditor = true;
@@ -247,6 +252,7 @@
     currentStepName = nodeData.label || nodeData.name || `Step ${node.id}`;
     currentStepCode = nodeData.pythonCode || "print('Hello from step')";
     currentStepDependencies = nodeData.dependencies || '';
+    currentStepSystemDependencies = nodeData.systemDependencies || '';
     
     // Open the editor panel
     showStepEditor = true;
@@ -292,6 +298,7 @@
             label: currentStepName,
             pythonCode: currentStepCode,
             dependencies: currentStepDependencies,
+            systemDependencies: currentStepSystemDependencies,
           }
         };
       }
@@ -325,6 +332,7 @@
           name: (nodeData.label as string) || node.id,
           pythonCode: (nodeData.pythonCode as string) || '',
           dependencies: (nodeData.dependencies as string) || undefined,
+          systemDependencies: (nodeData.systemDependencies as string) || undefined,
           position: node.position,
         };
       });
@@ -410,6 +418,7 @@
           name: (nodeData.label as string) || node.id,
           pythonCode: (nodeData.pythonCode as string) || '',
           dependencies: (nodeData.dependencies as string) || undefined,
+          systemDependencies: (nodeData.systemDependencies as string) || undefined,
           position: node.position,
         };
       });
@@ -560,7 +569,7 @@
             />
           </div>
           <div class="mb-4">
-            <label for="step-dependencies-input" class="block text-sm font-medium mb-2">Dependencies (optional)</label>
+            <label for="step-dependencies-input" class="block text-sm font-medium mb-2">Python Dependencies (optional)</label>
             <input
               id="step-dependencies-input"
               type="text"
@@ -568,6 +577,22 @@
               class="w-full px-3 py-2 border rounded"
               placeholder="e.g., numpy pandas"
             />
+            <p class="text-xs text-muted-foreground mt-1">
+              Python packages (space or comma-separated)
+            </p>
+          </div>
+          <div class="mb-4">
+            <label for="step-system-dependencies-input" class="block text-sm font-medium mb-2">System Dependencies (optional)</label>
+            <input
+              id="step-system-dependencies-input"
+              type="text"
+              bind:value={currentStepSystemDependencies}
+              class="w-full px-3 py-2 border rounded"
+              placeholder="e.g., gcc make cmake"
+            />
+            <p class="text-xs text-muted-foreground mt-1">
+              System-level packages installed via Nix Portable (e.g., gcc, make, cmake, pkg-config)
+            </p>
           </div>
           <div class="mb-4">
             <label for="step-code-editor" class="block text-sm font-medium mb-2">Python Code</label>

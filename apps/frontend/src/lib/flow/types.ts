@@ -4,6 +4,7 @@ export interface FlowStep {
   pythonCode: string;
   dependencies?: string;
   requirementsFile?: string;
+  systemDependencies?: string;
   position: { x: number; y: number };
 }
 

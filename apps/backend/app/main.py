@@ -122,8 +122,10 @@ except:
 
 class TaskSubmitRequest(BaseModel):
     pythonCode: str = "print('Processing task in Kind...')"
-    dependencies: str | None = None  # Space or comma-separated package names
+    dependencies: str | None = None  # Space or comma-separated Python package names
     requirementsFile: str | None = None  # requirements.txt content
+    systemDependencies: str | None = None  # Space or comma-separated Nix package names (e.g., "gcc make")
+    useCache: bool = True  # Whether to use UV and Nix cache volumes
     taskId: str | None = None  # Optional: task ID for rerun (creates new run of existing task)
 
 
@@ -852,43 +854,60 @@ def create_and_submit_workflow(
     python_code: str,
     dependencies: str | None = None,
     requirements_file: str | None = None,
+    system_dependencies: str | None = None,
+    use_cache: bool = True,
     namespace: str = "argo"
 ) -> str:
     """
     Helper function to create and submit an Argo Workflow using Hera SDK.
     Returns the workflow ID.
+    
+    Args:
+        python_code: Python code to execute
+        dependencies: Python package names (space or comma-separated)
+        requirements_file: requirements.txt content
+        system_dependencies: Nix package names (space or comma-separated, e.g., "gcc make")
+        use_cache: Whether to use UV and Nix cache volumes
+        namespace: Kubernetes namespace
     """
     # Check if PVC exists and is bound before creating workflow
     core_api = CoreV1Api()
-    try:
-        pvc = core_api.read_namespaced_persistent_volume_claim(
-            name="task-results-pvc",
-            namespace=namespace
-        )
-        pvc_status = pvc.status.phase if pvc.status else "Unknown"
-        if pvc_status != "Bound":
-            raise HTTPException(
-                status_code=400, 
-                detail=f"PVC 'task-results-pvc' is not bound. Current status: {pvc_status}. Please ensure the PV is available."
+    required_pvcs = ["task-results-pvc"]
+    if use_cache:
+        required_pvcs.extend(["uv-cache-pvc", "nix-store-pvc"])
+    
+    for pvc_name in required_pvcs:
+        try:
+            pvc = core_api.read_namespaced_persistent_volume_claim(
+                name=pvc_name,
+                namespace=namespace
             )
-    except Exception as pvc_error:
-        # If PVC doesn't exist, that's also a problem
-        if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
-            raise HTTPException(
-                status_code=400,
-                detail="PVC 'task-results-pvc' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pv.yaml"
-            )
-        # Re-raise if it's our HTTPException
-        if isinstance(pvc_error, HTTPException):
-            raise pvc_error
-        # Otherwise log and continue (might be a transient issue)
-        print(f"Warning: Could not verify PVC status: {pvc_error}")
+            pvc_status = pvc.status.phase if pvc.status else "Unknown"
+            if pvc_status != "Bound":
+                raise HTTPException(
+                    status_code=400, 
+                    detail=f"PVC '{pvc_name}' is not bound. Current status: {pvc_status}. Please ensure the PV is available."
+                )
+        except Exception as pvc_error:
+            # If PVC doesn't exist, that's also a problem
+            if "404" in str(pvc_error) or "Not Found" in str(pvc_error):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"PVC '{pvc_name}' not found. Please create it first using: kubectl apply -f infrastructure/k8s/pvc-cache-volumes.yaml"
+                )
+            # Re-raise if it's our HTTPException
+            if isinstance(pvc_error, HTTPException):
+                raise pvc_error
+            # Otherwise log and continue (might be a transient issue)
+            print(f"Warning: Could not verify PVC '{pvc_name}' status: {pvc_error}")
     
     # Create workflow using Hera SDK
     workflow_id = create_workflow_with_hera(
         python_code=python_code,
         dependencies=dependencies,
         requirements_file=requirements_file,
+        system_dependencies=system_dependencies,
+        use_cache=use_cache,
         namespace=namespace
     )
     
@@ -947,6 +966,7 @@ async def submit_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                 task.python_code = request.pythonCode
                 task.dependencies = request.dependencies if request.dependencies else None
                 task.requirements_file = request.requirementsFile if request.requirementsFile else None
+                task.system_dependencies = request.systemDependencies if request.systemDependencies else None
                 task.updated_at = datetime.utcnow()
                 db.commit()
                 task_id = request.taskId
@@ -957,7 +977,8 @@ async def submit_task(request: TaskSubmitRequest = TaskSubmitRequest()):
                     id=task_id,
                     python_code=request.pythonCode,
                     dependencies=request.dependencies if request.dependencies else None,
-                    requirements_file=request.requirementsFile if request.requirementsFile else None
+                    requirements_file=request.requirementsFile if request.requirementsFile else None,
+                    system_dependencies=request.systemDependencies if request.systemDependencies else None
                 )
                 db.add(task)
                 db.commit()
@@ -984,11 +1005,19 @@ async def submit_task(request: TaskSubmitRequest = TaskSubmitRequest()):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class TaskRunRequest(BaseModel):
+    systemDependencies: str | None = None  # Optional system dependencies for this run
+    useCache: bool = True  # Whether to use cache volumes
+
 @app.post("/api/v1/tasks/{task_id}/run")
-async def run_task(task_id: str):
+async def run_task(task_id: str, run_request: TaskRunRequest | None = None):
     """
     Execute a task that was previously saved.
     Creates the workflow and starts execution.
+    
+    Optional request body can include:
+    - systemDependencies: System dependencies (Nix packages) for this run
+    - useCache: Whether to use cache volumes (default: true)
     """
     try:
         namespace = os.getenv("ARGO_NAMESPACE", "argo")
@@ -1027,11 +1056,29 @@ async def run_task(task_id: str):
                         detail=f"Task {task_id} already has a running workflow (run #{latest_run.run_number if has_python_code else (latest_run[3] if isinstance(latest_run, tuple) else latest_run.run_number)}). Please wait for it to complete or cancel it first."
                     )
             
+            # Get system dependencies - priority: request > task > latest run > None
+            # Task takes priority over latest run because it's the source of truth (updated via "Edit & Rerun")
+            system_deps = None
+            if run_request and run_request.systemDependencies:
+                # Use system dependencies from request (explicitly provided)
+                system_deps = run_request.systemDependencies
+            elif task.system_dependencies:
+                # Use task's system dependencies (updated via "Edit & Rerun")
+                system_deps = task.system_dependencies
+            elif has_python_code and latest_run:
+                # Fallback to latest run's system dependencies (for backward compatibility)
+                system_deps = getattr(latest_run, 'system_dependencies', None)
+            
+            # Get use_cache setting
+            use_cache = run_request.useCache if run_request else True
+            
             # Create and submit workflow
             workflow_id = create_and_submit_workflow(
                 python_code=task.python_code,
                 dependencies=task.dependencies,
                 requirements_file=task.requirements_file,
+                system_dependencies=system_deps,
+                use_cache=use_cache,
                 namespace=namespace
             )
             
@@ -1059,6 +1106,7 @@ async def run_task(task_id: str):
                     python_code=task.python_code,
                     dependencies=task.dependencies,
                     requirements_file=task.requirements_file,
+                    system_dependencies=system_deps,  # Will be None for now, but field exists
                     started_at=datetime.utcnow()
                 )
                 db.add(task_run)
@@ -1072,29 +1120,59 @@ async def run_task(task_id: str):
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS python_code TEXT"))
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS dependencies TEXT"))
                         db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS requirements_file TEXT"))
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS system_dependencies TEXT"))
+                        db.commit()
+                        inspector = sql_inspect(engine)
+                        existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+                    elif 'system_dependencies' not in existing_columns:
+                        # Add system_dependencies column if it doesn't exist
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS system_dependencies TEXT"))
                         db.commit()
                         inspector = sql_inspect(engine)
                         existing_columns = [col['name'] for col in inspector.get_columns('task_runs')]
                     
                     if 'python_code' in existing_columns:
-                        result = db.execute(
-                            text("""
-                                INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, started_at, created_at)
-                                VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :started_at, :created_at)
-                                RETURNING id
-                            """),
-                            {
-                                "task_id": task_id,
-                                "workflow_id": workflow_id,
-                                "run_number": next_run_number,
-                                "phase": "Pending",
-                                "python_code": task.python_code,
-                                "dependencies": task.dependencies,
-                                "requirements_file": task.requirements_file,
-                                "started_at": datetime.utcnow(),
-                                "created_at": datetime.utcnow()
-                            }
-                        )
+                        # Check if system_dependencies column exists
+                        has_system_deps_col = 'system_dependencies' in existing_columns
+                        if has_system_deps_col:
+                            result = db.execute(
+                                text("""
+                                    INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, system_dependencies, started_at, created_at)
+                                    VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :system_dependencies, :started_at, :created_at)
+                                    RETURNING id
+                                """),
+                                {
+                                    "task_id": task_id,
+                                    "workflow_id": workflow_id,
+                                    "run_number": next_run_number,
+                                    "phase": "Pending",
+                                    "python_code": task.python_code,
+                                    "dependencies": task.dependencies,
+                                    "requirements_file": task.requirements_file,
+                                    "system_dependencies": system_deps,
+                                    "started_at": datetime.utcnow(),
+                                    "created_at": datetime.utcnow()
+                                }
+                            )
+                        else:
+                            result = db.execute(
+                                text("""
+                                    INSERT INTO task_runs (task_id, workflow_id, run_number, phase, python_code, dependencies, requirements_file, started_at, created_at)
+                                    VALUES (:task_id, :workflow_id, :run_number, :phase, :python_code, :dependencies, :requirements_file, :started_at, :created_at)
+                                    RETURNING id
+                                """),
+                                {
+                                    "task_id": task_id,
+                                    "workflow_id": workflow_id,
+                                    "run_number": next_run_number,
+                                    "phase": "Pending",
+                                    "python_code": task.python_code,
+                                    "dependencies": task.dependencies,
+                                    "requirements_file": task.requirements_file,
+                                    "started_at": datetime.utcnow(),
+                                    "created_at": datetime.utcnow()
+                                }
+                            )
                         db.commit()
                     else:
                         result = db.execute(
@@ -1180,6 +1258,16 @@ async def list_tasks():
                 inspector = sql_inspect(engine)
                 task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
                 has_python_code = 'python_code' in task_runs_columns
+                has_system_deps = 'system_dependencies' in task_runs_columns
+                
+                # Ensure system_dependencies column exists if python_code exists
+                if has_python_code and not has_system_deps:
+                    try:
+                        db.execute(text("ALTER TABLE task_runs ADD COLUMN IF NOT EXISTS system_dependencies TEXT"))
+                        db.commit()
+                        has_system_deps = True
+                    except Exception as e:
+                        print(f"Warning: Could not add system_dependencies column: {e}")
                 
                 if has_python_code:
                     latest_run = db.query(TaskRun).filter(
@@ -1294,6 +1382,7 @@ async def get_task(task_id: str):
                     "pythonCode": run.python_code,
                     "dependencies": run.dependencies or "",
                     "requirementsFile": run.requirements_file or "",
+                    "systemDependencies": getattr(run, 'system_dependencies', None) or "",
                     "startedAt": run.started_at.isoformat() if run.started_at else "",
                     "finishedAt": run.finished_at.isoformat() if run.finished_at else "",
                     "createdAt": run.created_at.isoformat()
@@ -1311,6 +1400,7 @@ async def get_task(task_id: str):
                     "pythonCode": task.python_code,  # In old schema, code is only in Task, not TaskRun
                     "dependencies": task.dependencies or "",
                     "requirementsFile": task.requirements_file or "",
+                    "systemDependencies": "",  # Old schema doesn't have system_dependencies
                     "startedAt": (getattr(run, 'started_at', None) or (run[5] if len(run) > 5 else None)),
                     "finishedAt": (getattr(run, 'finished_at', None) or (run[6] if len(run) > 6 else None)),
                     "createdAt": (getattr(run, 'created_at', None) or (run[7] if len(run) > 7 else None))
@@ -1331,14 +1421,16 @@ async def get_task(task_id: str):
         db.close()
         
         # Return task info with latest run's code (for backward compatibility)
+        # BUT use task's systemDependencies (not run's) because task is the source of truth updated via "Edit & Rerun"
         latest_run = runs[0] if runs else None
         if latest_run and has_python_code:
-            # New schema: use latest run's code
+            # New schema: use latest run's code, but task's systemDependencies
             return {
                 "id": task.id,
                 "pythonCode": latest_run.python_code,
                 "dependencies": latest_run.dependencies or "",
                 "requirementsFile": latest_run.requirements_file or "",
+                "systemDependencies": getattr(task, 'system_dependencies', None) or "",  # Use task's, not run's
                 "createdAt": task.created_at.isoformat(),
                 "updatedAt": task.updated_at.isoformat(),
                 "runs": run_list
@@ -1350,6 +1442,7 @@ async def get_task(task_id: str):
                 "pythonCode": task.python_code,
                 "dependencies": task.dependencies or "",
                 "requirementsFile": task.requirements_file or "",
+                "systemDependencies": getattr(task, 'system_dependencies', None) or "",
                 "createdAt": task.created_at.isoformat(),
                 "updatedAt": task.updated_at.isoformat(),
                 "runs": run_list
@@ -1488,6 +1581,88 @@ async def get_run_logs(task_id: str, run_number: int, db: Session = Depends(get_
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/v1/tasks/{task_id}/runs/{run_number}/template")
+async def get_task_run_template(task_id: str, run_number: int, db: Session = Depends(get_db)):
+    """Get the Argo Workflow YAML template for a task run."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Check schema and get run appropriately
+        from sqlalchemy import inspect as sql_inspect, text
+        from app.database import engine
+        inspector = sql_inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
+        # Get the run
+        if has_python_code:
+            run = db.query(TaskRun).filter(
+                TaskRun.task_id == task_id,
+                TaskRun.run_number == run_number
+            ).first()
+        else:
+            result = db.execute(
+                text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id AND run_number = :run_number LIMIT 1"),
+                {"task_id": task_id, "run_number": run_number}
+            ).fetchone()
+            run = result
+        
+        if not run:
+            raise HTTPException(status_code=404, detail=f"Run {run_number} not found for task {task_id}")
+        
+        # Get workflow_id (handle both TaskRun objects and Row objects)
+        if has_python_code:
+            workflow_id = run.workflow_id
+        else:
+            workflow_id = getattr(run, 'workflow_id', run[2] if len(run) > 2 else None)
+        
+        if not workflow_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow ID not found for task run {run_number}"
+            )
+        
+        # Fetch workflow from Kubernetes
+        try:
+            custom_api = CustomObjectsApi()
+            
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=workflow_id
+            )
+            
+            # Convert to YAML format
+            try:
+                import yaml
+                yaml_str = yaml.dump(workflow, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            except ImportError:
+                # Fallback to JSON if PyYAML is not available
+                import json
+                yaml_str = json.dumps(workflow, indent=2, default=str)
+            
+            return {
+                "workflowId": workflow_id,
+                "yaml": yaml_str
+            }
+        except Exception as k8s_error:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch workflow from Kubernetes: {str(k8s_error)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get task run template: {str(e)}")
+
 
 @app.get("/api/v1/tasks/{task_id}/logs")
 async def get_task_logs(task_id: str, run_number: int | None = None, db: Session = Depends(get_db)):

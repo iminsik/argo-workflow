@@ -1,0 +1,35 @@
+# PersistentVolumeClaims for cache volumes
+# These PVCs are used by Argo Workflows to cache dependencies
+
+---
+# UV Cache PVC for Python packages
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: uv-cache-pvc
+  namespace: argo
+  labels:
+    purpose: uv-cache
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+---
+# Nix Store PVC for system packages
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nix-store-pvc
+  namespace: argo
+  labels:
+    purpose: nix-store
+spec:
+  storageClassName: manual
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi  # Increased from 20Gi to 50Gi for more package storage

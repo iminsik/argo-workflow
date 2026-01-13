@@ -4,6 +4,7 @@
   import Badge from '$lib/components/ui/badge.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
   import MonacoEditor from './MonacoEditor.svelte';
+  import { ansiToHtml } from '$lib/ansi-to-html';
 
   interface Run {
     id: number;
@@ -13,6 +14,7 @@
     pythonCode: string;
     dependencies?: string;
     requirementsFile?: string;
+    systemDependencies?: string;
     startedAt: string;
     finishedAt: string;
     createdAt: string;
@@ -24,10 +26,11 @@
       phase: string;
       pythonCode: string;
       dependencies?: string;
+      systemDependencies?: string;
       message?: string;
     };
-    activeTab: 'code' | 'logs';
-    setActiveTab: (tab: 'code' | 'logs') => void;
+    activeTab: 'code' | 'logs' | 'template';
+    setActiveTab: (tab: 'code' | 'logs' | 'template') => void;
     taskLogs: Array<{
       node: string;
       pod: string;
@@ -38,7 +41,7 @@
     onClose: () => void;
     onCancel: (taskId: string) => void;
     onDelete: (taskId: string) => void;
-    onRerun: (task: { pythonCode: string; dependencies?: string }, taskId: string) => void;
+    onRerun: (task: { pythonCode: string; dependencies?: string; systemDependencies?: string; requirementsFile?: string }, taskId: string) => void;
     onRun?: (taskId: string) => void;
     onLoadRunLogs?: (taskId: string, runNumber: number) => Promise<void>;
   }
@@ -49,6 +52,8 @@
   let runs = $state<Run[]>([]);
   let selectedRunNumber = $state<number | null>(null);
   let loadingRuns = $state(false);
+  let templateYaml = $state<string>('');
+  let loadingTemplate = $state(false);
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   const canRun = $derived(task.phase !== 'Running' && task.phase !== 'Pending');
@@ -58,6 +63,8 @@
   const selectedRun = $derived(runs.find(r => r.runNumber === selectedRunNumber));
   const displayCode = $derived(selectedRun?.pythonCode || task.pythonCode);
   const displayDependencies = $derived(selectedRun?.dependencies || task.dependencies);
+  const displaySystemDependencies = $derived(selectedRun?.systemDependencies || task.systemDependencies);
+  const displayRequirementsFile = $derived(selectedRun?.requirementsFile || task.requirementsFile);
 
   function getPhaseColor(phase: string): string {
     switch (phase) {
@@ -116,7 +123,29 @@
     if (onLoadRunLogs && activeTab === 'logs') {
       await onLoadRunLogs(task.id, runNumber);
     }
+    if (activeTab === 'template') {
+      await loadTemplate();
+    }
     // Code tab will automatically update via reactive $derived variables
+  }
+
+  async function loadTemplate() {
+    if (!selectedRunNumber) return;
+    try {
+      loadingTemplate = true;
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${task.id}/runs/${selectedRunNumber}/template`);
+      if (res.ok) {
+        const data = await res.json();
+        templateYaml = data.yaml || '';
+      } else {
+        templateYaml = `Error loading template: ${res.statusText}`;
+      }
+    } catch (error) {
+      console.error('Failed to load template:', error);
+      templateYaml = `Error loading template: ${error}`;
+    } finally {
+      loadingTemplate = false;
+    }
   }
 </script>
 
@@ -136,7 +165,12 @@
       {/if}
       {#if displayDependencies}
         <Badge variant="outline" class="max-w-md">
-          📦 Dependencies: {displayDependencies}
+          📦 Python: {displayDependencies}
+        </Badge>
+      {/if}
+      {#if displaySystemDependencies}
+        <Badge variant="outline" class="max-w-md">
+          🔧 System: {displaySystemDependencies}
         </Badge>
       {/if}
     </div>
@@ -150,7 +184,12 @@
         </Button>
       {/if}
       <Button
-        onclick={() => onRerun({ pythonCode: displayCode, dependencies: displayDependencies }, task.id)}
+        onclick={() => onRerun({ 
+          pythonCode: displayCode, 
+          dependencies: displayDependencies,
+          systemDependencies: displaySystemDependencies || "",  // Use selected run's systemDependencies, or task's if no run selected
+          requirementsFile: displayRequirementsFile || ""  // Use selected run's requirementsFile, or task's if no run selected
+        }, task.id)}
         variant="default"
       >
         <Play size={16} class="mr-2" /> Edit & Rerun
@@ -220,6 +259,17 @@
     >
       Logs{#if loadingLogs} ...{/if}
     </button>
+    <button
+      onclick={() => {
+        setActiveTab('template');
+        if (selectedRunNumber) {
+          loadTemplate();
+        }
+      }}
+      class="px-5 py-2 border-none bg-transparent cursor-pointer border-b-2 transition-colors {activeTab === 'template' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground'}"
+    >
+      Template{#if loadingTemplate} ...{/if}
+    </button>
   </div>
 
   <!-- Tab Content -->
@@ -230,9 +280,20 @@
           <div class="mb-4 p-3 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded">
             <div class="text-sm font-semibold text-blue-900 dark:text-blue-100 mb-1 flex items-center gap-2">
               <span>📦</span>
-              <span>Dependencies</span>
+              <span>Python Dependencies</span>
             </div>
             <div class="text-sm text-blue-800 dark:text-blue-200 font-mono break-words">{displayDependencies}</div>
+          </div>
+        {/if}
+        {#if displaySystemDependencies}
+          <div class="mb-4 p-3 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800 rounded">
+            <div class="text-sm font-semibold text-green-900 dark:text-green-100 mb-1 flex items-center gap-2">
+              <span>🔧</span>
+              <span>System Dependencies</span>
+            </div>
+            <div class="text-sm text-green-800 dark:text-green-200 font-mono break-words">
+              {displaySystemDependencies}
+            </div>
           </div>
         {/if}
         <div class="flex-1 min-h-0 overflow-hidden">
@@ -253,7 +314,7 @@
           {/if}
         </div>
       </div>
-    {:else}
+    {:else if activeTab === 'logs'}
       <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm whitespace-pre-wrap">
         {#if loadingLogs}
           <div class="text-[#9ca3af]">Loading logs...</div>
@@ -266,10 +327,38 @@
                 <strong>Pod:</strong> {logEntry.pod} | <strong>Node:</strong> {logEntry.node} | <strong>Phase:</strong> {logEntry.phase}
               </div>
               <div class="text-[#d4d4d4] whitespace-pre-wrap break-words">
-                {logEntry.logs}
+                {#each ansiToHtml(logEntry.logs) as token}
+                  {#if token.classes.length > 0}
+                    <span class={token.classes.join(' ')}>{token.text}</span>
+                  {:else}
+                    {token.text}
+                  {/if}
+                {/each}
               </div>
             </div>
           {/each}
+        {/if}
+      </div>
+    {:else if activeTab === 'template'}
+      <div class="flex-1 min-h-0 overflow-hidden">
+        {#if loadingTemplate}
+          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+            <div class="text-[#9ca3af]">Loading template...</div>
+          </div>
+        {:else if templateYaml}
+          <div class="h-full w-full">
+            <MonacoEditor 
+              value={templateYaml} 
+              language="yaml" 
+              theme="vs-dark" 
+              height="100%"
+              readonly={true}
+            />
+          </div>
+        {:else}
+          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+            <div class="text-[#9ca3af]">No template available. Select a run to view its Argo Workflow template.</div>
+          </div>
         {/if}
       </div>
     {/if}
