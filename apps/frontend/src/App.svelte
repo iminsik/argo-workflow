@@ -37,7 +37,7 @@
   let tasks = $state<Task[]>([]);
   let initialLoading = $state(true);
   let selectedTaskId = $state<string | null>(null);
-  let activeTab = $state<'code' | 'logs'>('code');
+  let activeTab = $state<'code' | 'logs' | 'template'>('code');
   
   // Track previous values to detect actual changes
   let prevSelectedTaskId: string | null = null;

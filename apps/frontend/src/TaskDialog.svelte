@@ -29,8 +29,8 @@
       systemDependencies?: string;
       message?: string;
     };
-    activeTab: 'code' | 'logs';
-    setActiveTab: (tab: 'code' | 'logs') => void;
+    activeTab: 'code' | 'logs' | 'template';
+    setActiveTab: (tab: 'code' | 'logs' | 'template') => void;
     taskLogs: Array<{
       node: string;
       pod: string;
@@ -52,6 +52,8 @@
   let runs = $state<Run[]>([]);
   let selectedRunNumber = $state<number | null>(null);
   let loadingRuns = $state(false);
+  let templateYaml = $state<string>('');
+  let loadingTemplate = $state(false);
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   const canRun = $derived(task.phase !== 'Running' && task.phase !== 'Pending');
@@ -121,7 +123,29 @@
     if (onLoadRunLogs && activeTab === 'logs') {
       await onLoadRunLogs(task.id, runNumber);
     }
+    if (activeTab === 'template') {
+      await loadTemplate();
+    }
     // Code tab will automatically update via reactive $derived variables
+  }
+
+  async function loadTemplate() {
+    if (!selectedRunNumber) return;
+    try {
+      loadingTemplate = true;
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${task.id}/runs/${selectedRunNumber}/template`);
+      if (res.ok) {
+        const data = await res.json();
+        templateYaml = data.yaml || '';
+      } else {
+        templateYaml = `Error loading template: ${res.statusText}`;
+      }
+    } catch (error) {
+      console.error('Failed to load template:', error);
+      templateYaml = `Error loading template: ${error}`;
+    } finally {
+      loadingTemplate = false;
+    }
   }
 </script>
 
@@ -235,6 +259,17 @@
     >
       Logs{#if loadingLogs} ...{/if}
     </button>
+    <button
+      onclick={() => {
+        setActiveTab('template');
+        if (selectedRunNumber) {
+          loadTemplate();
+        }
+      }}
+      class="px-5 py-2 border-none bg-transparent cursor-pointer border-b-2 transition-colors {activeTab === 'template' ? 'border-primary text-primary font-bold' : 'border-transparent text-muted-foreground'}"
+    >
+      Template{#if loadingTemplate} ...{/if}
+    </button>
   </div>
 
   <!-- Tab Content -->
@@ -279,7 +314,7 @@
           {/if}
         </div>
       </div>
-    {:else}
+    {:else if activeTab === 'logs'}
       <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm whitespace-pre-wrap">
         {#if loadingLogs}
           <div class="text-[#9ca3af]">Loading logs...</div>
@@ -302,6 +337,28 @@
               </div>
             </div>
           {/each}
+        {/if}
+      </div>
+    {:else if activeTab === 'template'}
+      <div class="flex-1 min-h-0 overflow-hidden">
+        {#if loadingTemplate}
+          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+            <div class="text-[#9ca3af]">Loading template...</div>
+          </div>
+        {:else if templateYaml}
+          <div class="h-full w-full">
+            <MonacoEditor 
+              value={templateYaml} 
+              language="yaml" 
+              theme="vs-dark" 
+              height="100%"
+              readonly={true}
+            />
+          </div>
+        {:else}
+          <div class="bg-[#1e1e1e] text-[#d4d4d4] p-4 rounded border border-[#3e3e3e] flex-1 min-h-0 overflow-auto font-mono text-sm">
+            <div class="text-[#9ca3af]">No template available. Select a run to view its Argo Workflow template.</div>
+          </div>
         {/if}
       </div>
     {/if}
