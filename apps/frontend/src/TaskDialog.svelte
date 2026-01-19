@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { XCircle, Trash2, Play } from 'lucide-svelte';
+  import { XCircle, Trash2, Play, FileCode } from 'lucide-svelte';
   import Button from '$lib/components/ui/button.svelte';
   import Badge from '$lib/components/ui/badge.svelte';
   import Dialog from '$lib/components/ui/dialog.svelte';
@@ -49,6 +49,11 @@
   let runs = $state<Run[]>([]);
   let selectedRunNumber = $state<number | null>(null);
   let loadingRuns = $state(false);
+  
+  // Template dialog state
+  let templateDialogOpen = $state(false);
+  let templateYaml = $state<string>('');
+  let loadingTemplate = $state(false);
 
   const canCancel = $derived(task.phase === 'Running' || task.phase === 'Pending');
   const canRun = $derived(task.phase !== 'Running' && task.phase !== 'Pending');
@@ -118,6 +123,28 @@
     }
     // Code tab will automatically update via reactive $derived variables
   }
+
+  async function fetchTemplate() {
+    if (!selectedRunNumber) return;
+    
+    try {
+      loadingTemplate = true;
+      const res = await fetch(`${apiUrl}/api/v1/tasks/${task.id}/runs/${selectedRunNumber}/template`);
+      if (res.ok) {
+        const data = await res.json();
+        templateYaml = data.yaml || '';
+        templateDialogOpen = true;
+      } else {
+        const errorData = await res.json();
+        alert(`Failed to fetch template: ${errorData.detail || 'Unknown error'}`);
+      }
+    } catch (error) {
+      console.error('Failed to fetch template:', error);
+      alert('Failed to fetch template. Please try again.');
+    } finally {
+      loadingTemplate = false;
+    }
+  }
 </script>
 
 <Dialog bind:open={dialogOpen} class="max-w-4xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
@@ -155,6 +182,15 @@
       >
         <Play size={16} class="mr-2" /> Edit & Rerun
       </Button>
+      {#if selectedRunNumber}
+        <Button
+          onclick={fetchTemplate}
+          variant="outline"
+          disabled={loadingTemplate}
+        >
+          <FileCode size={16} class="mr-2" /> Template
+        </Button>
+      {/if}
       {#if canCancel}
         <Button
           onclick={() => onCancel(task.id)}
@@ -272,6 +308,23 @@
           {/each}
         {/if}
       </div>
+    {/if}
+  </div>
+</Dialog>
+
+<!-- Template Dialog -->
+<Dialog bind:open={templateDialogOpen} onOpenChange={(open: boolean) => templateDialogOpen = open} class="max-w-4xl w-[90%] h-[85vh] max-h-[85vh] flex flex-col">
+  <div class="flex justify-between items-center mb-4">
+    <h2 class="text-2xl font-semibold">Workflow Template - Run #{selectedRunNumber}</h2>
+  </div>
+  
+  <div class="flex-1 overflow-hidden flex flex-col">
+    {#if loadingTemplate}
+      <p class="text-muted-foreground">Loading template...</p>
+    {:else if templateYaml}
+      <MonacoEditor bind:value={templateYaml} language="yaml" theme="vs-dark" height="100%" readonly={true} />
+    {:else}
+      <p class="text-muted-foreground">No template available</p>
     {/if}
   </div>
 </Dialog>

@@ -1489,6 +1489,96 @@ async def get_run_logs(task_id: str, run_number: int, db: Session = Depends(get_
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/v1/tasks/{task_id}/runs/{run_number}/template")
+async def get_task_run_template(task_id: str, run_number: int, db: Session = Depends(get_db)):
+    """Get the Argo Workflow YAML template for a task run."""
+    try:
+        namespace = os.getenv("ARGO_NAMESPACE", "argo")
+        
+        # Get the task
+        task = db.query(Task).filter(Task.id == task_id).first()
+        if not task:
+            raise HTTPException(status_code=404, detail=f"Task {task_id} not found")
+        
+        # Check schema and get run appropriately
+        from sqlalchemy import inspect as sql_inspect, text
+        from app.database import engine
+        inspector = sql_inspect(engine)
+        task_runs_columns = [col['name'] for col in inspector.get_columns('task_runs')]
+        has_python_code = 'python_code' in task_runs_columns
+        
+        # Get the run
+        if has_python_code:
+            task_run = db.query(TaskRun).filter(
+                TaskRun.task_id == task_id,
+                TaskRun.run_number == run_number
+            ).first()
+        else:
+            result = db.execute(
+                text("SELECT id, task_id, workflow_id, run_number, phase, started_at, finished_at, created_at FROM task_runs WHERE task_id = :task_id AND run_number = :run_number LIMIT 1"),
+                {"task_id": task_id, "run_number": run_number}
+            ).fetchone()
+            task_run = result
+        
+        if not task_run:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Task run {run_number} not found for task {task_id}"
+            )
+        
+        # Get workflow_id (handle both TaskRun objects and Row objects)
+        if has_python_code:
+            workflow_id = task_run.workflow_id
+        else:
+            workflow_id = getattr(task_run, 'workflow_id', task_run[2] if len(task_run) > 2 else None)
+        
+        if not workflow_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Workflow ID not found for task run {run_number}"
+            )
+        
+        # Fetch workflow from Kubernetes
+        try:
+            from kubernetes.client import CustomObjectsApi
+            custom_api = CustomObjectsApi()
+            
+            workflow = custom_api.get_namespaced_custom_object(
+                group="argoproj.io",
+                version="v1alpha1",
+                namespace=namespace,
+                plural="workflows",
+                name=workflow_id
+            )
+            
+            # Convert to YAML format
+            try:
+                import yaml
+                yaml_str = yaml.dump(workflow, default_flow_style=False, sort_keys=False, allow_unicode=True)
+            except ImportError:
+                # Fallback to JSON if PyYAML is not available
+                import json
+                yaml_str = json.dumps(workflow, indent=2, default=str)
+            
+            return {
+                "workflowId": workflow_id,
+                "yaml": yaml_str
+            }
+        except Exception as k8s_error:
+            import traceback
+            traceback.print_exc()
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to fetch workflow from Kubernetes: {str(k8s_error)}"
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Failed to get task run template: {str(e)}")
+
+
 @app.get("/api/v1/tasks/{task_id}/logs")
 async def get_task_logs(task_id: str, run_number: int | None = None, db: Session = Depends(get_db)):
     """
